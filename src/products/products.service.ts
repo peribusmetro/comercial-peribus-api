@@ -16,6 +16,30 @@ export class ProductsService {
     );
   }
 
+  /**
+   * Obtiene la fecha/hora actual en zona horaria de Ciudad de México
+   */
+  private getMexicoCityDateTime(): string {
+    const now = new Date();
+    // Convertir a zona horaria de Ciudad de México usando Intl.DateTimeFormat
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Mexico_City',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    });
+
+    const parts = formatter.formatToParts(now);
+    const get = (type: string) => parts.find(p => p.type === type)?.value || '00';
+
+    // Formato: YYYY-MM-DDTHH:mm:ss
+    return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}:${get('second')}`;
+  }
+
   async upsertProducts(productsData: ProductInputDto[]): Promise<{
     created: number;
     updated: number;
@@ -57,7 +81,7 @@ export class ProductsService {
             .from('comercial_products')
             .update({
               ...dbData,
-              updated_at: new Date().toISOString(),
+              updated_at: this.getMexicoCityDateTime(),
             })
             .eq('id_product', productData.idProduct);
 
@@ -73,7 +97,7 @@ export class ProductsService {
           .insert({
             ...dbData,
             active: 1,
-            created_at: new Date().toISOString(),
+            created_at: this.getMexicoCityDateTime(),
           });
 
         if (insertError) {
