@@ -1,0 +1,22 @@
+meta {
+  name: Get Products - Bearer Token
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{baseUrl}}/products
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{apiKey}}
+}
+
+docs {
+  Obtiene todos los productos usando autenticación Bearer Token.
+
+  Este request usa el header Authorization: Bearer en lugar de X-API-Key.
+  Ambos métodos son válidos para autenticación.
+}

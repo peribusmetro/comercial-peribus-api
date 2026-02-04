@@ -1,0 +1,21 @@
+meta {
+  name: Get All Products
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/products
+  body: none
+  auth: none
+}
+
+headers {
+  X-API-Key: {{apiKey}}
+}
+
+docs {
+  Obtiene todos los productos de la tabla comercial_products.
+
+  Requiere API Key en el header X-API-Key o Authorization: Bearer token.
+}

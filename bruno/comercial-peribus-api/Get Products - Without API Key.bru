@@ -1,0 +1,24 @@
+meta {
+  name: Get Products - Without API Key
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseUrl}}/products
+  body: none
+  auth: none
+}
+
+docs {
+  Prueba de endpoint protegido SIN API Key.
+
+  Este request NO incluye el header X-API-Key y debe fallar con error 401 Unauthorized.
+
+  Respuesta esperada:
+  {
+    "message": "API Key es requerida",
+    "error": "Unauthorized",
+    "statusCode": 401
+  }
+}

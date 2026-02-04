@@ -1,0 +1,62 @@
+meta {
+  name: Upsert Products
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/products/upsert
+  body: json
+  auth: none
+}
+
+headers {
+  X-API-Key: {{apiKey}}
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "products": [
+      {
+        "idProduct": 12345,
+        "state": "Disponible",
+        "family": "Electrónica",
+        "unitOfAverage": "Unidad",
+        "productName": "Laptop HP ProBook 450 G9"
+      },
+      {
+        "idProduct": 67890,
+        "state": "Disponible",
+        "family": "Periféricos",
+        "unitOfAverage": "Pieza",
+        "productName": "Mouse Logitech MX Master 3S"
+      }
+    ]
+  }
+}
+
+docs {
+  Crea o actualiza productos en la tabla comercial_products.
+
+  - Si el producto no existe (basado en idProduct), se crea
+  - Si el producto existe y hay cambios, se actualiza (solo updated_at)
+  - Si el producto existe sin cambios, no se modifica
+
+  Campos requeridos:
+  - idProduct: Identificador único del producto
+
+  Campos opcionales:
+  - state: Estado del producto
+  - family: Familia del producto
+  - unitOfAverage: Unidad de medida
+  - productName: Nombre del producto
+
+  Campos auto-generados:
+  - id: ID incremental de la base de datos
+  - created_at: Fecha de creación
+  - updated_at: Fecha de última actualización
+  - active: Estado activo (1 por defecto)
+
+  Requiere API Key en el header X-API-Key o Authorization: Bearer token.
+}

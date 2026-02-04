@@ -1,0 +1,19 @@
+meta {
+  name: Health Check (Public)
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/
+  body: none
+  auth: none
+}
+
+docs {
+  Endpoint público para verificar que la API está funcionando.
+
+  Este endpoint NO requiere API Key porque está marcado como @Public().
+
+  Respuesta esperada: "Hello World!"
+}
