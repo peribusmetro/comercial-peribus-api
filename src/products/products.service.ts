@@ -56,6 +56,7 @@ export class ProductsService {
         family: productData.family,
         unit_of_average: productData.unitOfAverage,
         product_name: productData.productName,
+        product_code: productData.productCode,
       };
 
       // Buscar producto existente por id_product
@@ -132,7 +133,8 @@ export class ProductsService {
       existing.state !== incoming.state ||
       existing.family !== incoming.family ||
       existing.unit_of_average !== incoming.unit_of_average ||
-      existing.product_name !== incoming.product_name
+      existing.product_name !== incoming.product_name ||
+      existing.product_code !== incoming.product_code
     );
   }
 }

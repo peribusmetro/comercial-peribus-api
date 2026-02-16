@@ -23,4 +23,9 @@ export class ProductInputDto {
   @IsString()
   @MaxLength(256)
   productName?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  productCode?: string;
 }

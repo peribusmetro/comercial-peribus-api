@@ -20,6 +20,9 @@ export class Product {
   @Column({ type: 'varchar', length: 256, nullable: true, name: 'product_name' })
   productName: string;
 
+  @Column({ type: 'varchar', length: 256, nullable: true, name: 'product_code' })
+  productCode: string;
+
   @UpdateDateColumn({ type: 'timestamp', name: 'updated_at', nullable: true })
   updatedAt: Date;
 
