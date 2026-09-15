@@ -1,9 +1,19 @@
 # Archivos de entorno
 .env
 .env.local
+.env.development
+.env.production
 .env.development.local
 .env.test.local
 .env.production.local
+
+# Salidas de auditoría (pueden contener datos de negocio)
+reports/
+*.audit.json
+
+# Evidencias de casos reales (capturas con datos de proveedores y montos).
+# Los casos están documentados en los comentarios y tests de src/domain/.
+evidence/
 
 # Dependencias
 node_modules/
