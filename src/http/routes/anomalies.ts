@@ -110,7 +110,12 @@ anomaliesRouter.get(
 
 const flagsQuery = z.object({
   documentIds: z.string().optional(),
-  onlyPending: z.coerce.boolean().default(true),
+  // NO usar z.coerce.boolean(): aplica Boolean(value), y toda cadena no vacía
+  // es truthy — "false" daría true y el filtro quedaría inoperante.
+  onlyPending: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true'),
 });
 
 /**

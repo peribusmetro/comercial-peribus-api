@@ -23,22 +23,63 @@ export const internalRouter = Router();
 
 const stepSchema = z.enum(['documents', 'movements', 'catalogs', 'validate']);
 
-/** Evita que dos corridas del mismo paso se pisen. */
+/** Minutos tras los cuales una corrida 'running' se considera abandonada. */
+const STALE_RUN_MINUTES = 30;
+
+/**
+ * Evita que dos corridas del mismo paso se pisen.
+ *
+ * Antes de decidir, cierra las corridas abandonadas: si la lambda murió a
+ * media corrida, la fila queda en 'running' para siempre y bloquearía el paso
+ * indefinidamente. Marcarlas como fallidas las vuelve visibles en el historial
+ * y libera el paso para el siguiente intento.
+ */
 async function hasRunningStep(step: string): Promise<boolean> {
-  const rows = await validatorDb<{ id: string }[]>`
-    SELECT id FROM sync_runs
+  await validatorDb`
+    UPDATE sync_runs
+    SET status        = 'failed',
+        finished_at   = NOW(),
+        error_message = 'Corrida abandonada: sin señales de avance. Probable corte del proceso.'
     WHERE step = ${step}
       AND status = 'running'
-      -- Una corrida "running" de hace más de una hora se considera colgada.
-      AND started_at > NOW() - INTERVAL '1 hour'
+      AND started_at < NOW() - (${STALE_RUN_MINUTES} * INTERVAL '1 minute')
+  `;
+
+  const rows = await validatorDb<{ id: string }[]>`
+    SELECT id FROM sync_runs
+    WHERE step = ${step} AND status = 'running'
     LIMIT 1
   `;
+
   return rows.length > 0;
+}
+
+/**
+ * Mantiene viva la lambda mientras el trabajo en segundo plano termina.
+ *
+ * En Vercel la función se congela al enviar la respuesta: sin `waitUntil`, un
+ * ETL largo se cortaría a media corrida y dejaría `sync_runs` en 'running'
+ * para siempre, bloqueando el paso durante la siguiente hora.
+ *
+ * Fuera de Vercel el import no existe y se sigue de largo (el proceso local
+ * no se congela).
+ */
+function keepAlive(promise: Promise<unknown>): void {
+  try {
+    // Import diferido: en local `@vercel/functions` puede no estar disponible
+    // y no debe romper el arranque.
+    const { waitUntil } = require('@vercel/functions') as {
+      waitUntil?: (p: Promise<unknown>) => void;
+    };
+    waitUntil?.(promise);
+  } catch {
+    // Entorno no-Vercel: el proceso sigue vivo por su cuenta.
+  }
 }
 
 /** Ejecuta el paso en segundo plano y deja el resultado en sync_runs. */
 function executeInBackground(step: string, runId: number, full: boolean): void {
-  void (async () => {
+  const work = (async () => {
     try {
       if (step === 'documents') {
         const r = await syncDocuments({ full });
@@ -87,6 +128,8 @@ function executeInBackground(step: string, runId: number, full: boolean): void {
       }
     }
   })();
+
+  keepAlive(work);
 }
 
 // ---------------------------------------------------------------------------

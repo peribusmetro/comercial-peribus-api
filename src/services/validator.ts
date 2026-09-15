@@ -9,6 +9,7 @@ import {
   resolveMaintenanceFolios,
 } from './folio-resolver';
 import { applyVerdict, fetchActiveVerdicts, fetchFolioRuleExemptions } from './verdicts';
+import type { LinkToApply } from './link-applier';
 
 /**
  * Orquestador de la validación.
@@ -25,13 +26,23 @@ import { applyVerdict, fetchActiveVerdicts, fetchFolioRuleExemptions } from './v
 export interface ValidationSummary {
   documentsEvaluated: number;
   pairsEvaluated: number;
+  /** Anomalías nuevas escritas (las repetidas con igual huella no se recuentan). */
+  anomaliesPersisted: number;
+  /** Anomalías detectadas en esta corrida, incluidas las ya conocidas. */
   anomaliesDetected: number;
   quarantined: number;
   flagged: number;
+  /** Pares que pueden ligarse: por reglas limpias o por veredicto aprobado. */
   linkable: number;
+  /** Pares omitidos porque un humano los rechazó o los mandó a otro folio. */
   skippedByVerdict: number;
+  /** Pares ligados por decisión humana previa, sin volver a evaluar reglas. */
+  linkedByVerdict: number;
   foliosNotFound: number;
   byRule: Record<string, number>;
+  /** Solo en modo enforce. */
+  linksApplied?: number;
+  linkErrors?: string[];
 }
 
 export interface ValidationOptions {
@@ -189,13 +200,32 @@ async function persistAnomalies(
   let written = 0;
   const CHUNK = 500;
 
-  for (let i = 0; i < rows.length; i += CHUNK) {
-    const batch = rows.slice(i, i + CHUNK);
-    // La unicidad incluye el fingerprint: si el documento cambia en el ERP,
-    // se registra una anomalía nueva en vez de pisar la histórica.
+  // La deduplicación usa dos índices parciales (ver migración 003) porque en
+  // Postgres un NULL nunca colisiona en un índice único: sin separarlos, una
+  // anomalía sin folio se duplicaría en cada corrida. Por eso los lotes se
+  // separan según tengan folio o no.
+  const withFolio = rows.filter((r) => r.folio_pid !== null);
+  const withoutFolio = rows.filter((r) => r.folio_pid === null);
+
+  for (let i = 0; i < withFolio.length; i += CHUNK) {
+    const batch = withFolio.slice(i, i + CHUNK);
+    // El fingerprint forma parte de la clave: si el documento cambia en el
+    // ERP, se registra una anomalía nueva en vez de pisar la histórica.
     const result = await validatorDb`
       INSERT INTO anomalies ${validatorDb(batch)}
       ON CONFLICT (document_id, folio_pid, rule_code, source_fingerprint)
+      WHERE folio_pid IS NOT NULL
+      DO NOTHING
+    `;
+    written += result.count ?? 0;
+  }
+
+  for (let i = 0; i < withoutFolio.length; i += CHUNK) {
+    const batch = withoutFolio.slice(i, i + CHUNK);
+    const result = await validatorDb`
+      INSERT INTO anomalies ${validatorDb(batch)}
+      ON CONFLICT (document_id, rule_code, source_fingerprint)
+      WHERE folio_pid IS NULL
       DO NOTHING
     `;
     written += result.count ?? 0;
@@ -223,11 +253,13 @@ export async function runValidation(
   const summary: ValidationSummary = {
     documentsEvaluated: 0,
     pairsEvaluated: 0,
+    anomaliesPersisted: 0,
     anomaliesDetected: 0,
     quarantined: 0,
     flagged: 0,
     linkable: 0,
     skippedByVerdict: 0,
+    linkedByVerdict: 0,
     foliosNotFound: 0,
     byRule: {},
   };
@@ -278,7 +310,7 @@ export async function runValidation(
   summary.foliosNotFound = folioLookup.missing.length;
 
   const pendingAnomalies: (DetectedAnomaly & { fingerprint: string })[] = [];
-  const linkable: { documentId: number; folioPid: string; entityId: number }[] = [];
+  const linkable: LinkToApply[] = [];
 
   for (const doc of documents) {
     const fingerprint = fingerprints.get(doc.document_id)!;
@@ -302,8 +334,16 @@ export async function runValidation(
       }
 
       if (decision.decision === 'link') {
-        summary.skippedByVerdict++;
-        linkable.push({ documentId: doc.document_id, folioPid: pid, entityId: folio.entityId });
+        // Aprobado por un humano: se liga sin volver a evaluar reglas.
+        // Cuenta como `linkable` (se va a ligar), no como omitido.
+        summary.linkedByVerdict++;
+        summary.linkable++;
+        linkable.push({
+          documentId: doc.document_id,
+          folioPid: pid,
+          entityId: folio.entityId,
+          matchMethod: 'manual_verdict',
+        });
         continue;
       }
 
@@ -324,6 +364,7 @@ export async function runValidation(
 
       for (const anomaly of anomalies) {
         pendingAnomalies.push({ ...anomaly, fingerprint });
+        summary.anomaliesDetected++;
         summary.byRule[anomaly.ruleCode] = (summary.byRule[anomaly.ruleCode] ?? 0) + 1;
         if (anomaly.action === 'quarantine') summary.quarantined++;
         else summary.flagged++;
@@ -336,12 +377,30 @@ export async function runValidation(
     }
   }
 
-  summary.anomaliesDetected = await persistAnomalies(pendingAnomalies, options.runId ?? null);
+  // persistAnomalies devuelve filas NUEVAS: las ya registradas con la misma
+  // huella no se recuentan (ON CONFLICT DO NOTHING). Por eso se guarda aparte
+  // de anomaliesDetected, que sí cuenta todo lo visto en esta corrida.
+  summary.anomaliesPersisted = await persistAnomalies(pendingAnomalies, options.runId ?? null);
 
   // En modo auditoría se reporta y no se toca nada más.
   if (mode === 'enforce' && linkable.length > 0) {
     const { applyLinks } = await import('./link-applier');
-    await applyLinks(linkable, options.runId ?? null);
+    const applied = await applyLinks(linkable, options.runId ?? null);
+
+    summary.linksApplied = applied.applied;
+    summary.linkErrors = applied.errors;
+
+    // Un fallo del aplicador NO puede pasar como corrida exitosa: sin esto,
+    // enforce podría no ligar nada durante semanas sin ninguna señal.
+    for (const error of applied.errors) {
+      console.error('applyLinks:', error);
+    }
+
+    if (applied.errors.length > 0 && applied.applied === 0) {
+      throw new Error(
+        `El aplicador de links falló por completo (${applied.attempted} intentos): ${applied.errors[0]}`,
+      );
+    }
   }
 
   return summary;

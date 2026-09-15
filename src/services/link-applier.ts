@@ -55,16 +55,24 @@ export async function applyLinks(
     const batch = links.slice(i, i + CHUNK);
 
     try {
+      // Los ::int / ::text NO son decorativos.
+      //
+      // En un VALUES dentro de un subquery en FROM, Postgres no tiene columna
+      // destino de la cual inferir el tipo de los parámetros, y el driver los
+      // envía sin OID (solo tipa Date, Buffer, boolean y bigint). Sin los
+      // casts, todo llega como `text` y el INSERT revienta con
+      // "operator does not exist: integer = text" en el NOT EXISTS.
+      // Verificado contra Postgres 15.
       const rows = await appDb<{ document_id: number; linked_pid: string }[]>`
         INSERT INTO comercial_document_links
           (document_id, link_type, maintenance_id, linked_pid, match_method, confidence)
         SELECT
-          v.document_id,
+          v.document_id::int,
           'maintenance',
-          v.maintenance_id,
-          v.linked_pid,
-          v.match_method,
-          v.confidence
+          v.maintenance_id::int,
+          v.linked_pid::text,
+          v.match_method::text,
+          v.confidence::text
         FROM (
           VALUES ${appDb(
             batch.map((l) => [
@@ -78,8 +86,8 @@ export async function applyLinks(
         ) AS v(document_id, maintenance_id, linked_pid, match_method, confidence)
         WHERE NOT EXISTS (
           SELECT 1 FROM comercial_document_links existing
-          WHERE existing.document_id = v.document_id
-            AND existing.maintenance_id = v.maintenance_id
+          WHERE existing.document_id = v.document_id::int
+            AND existing.maintenance_id = v.maintenance_id::int
         )
         RETURNING document_id, linked_pid
       `;
@@ -126,9 +134,44 @@ export async function applyLinks(
  * Revoca un link previamente aplicado.
  *
  * Se usa cuando un humano rechaza un par que el validador había ligado.
- * Desactiva en vez de borrar: la app usa índices únicos parciales
- * (WHERE active = 1) justamente para permitir re-vincular después.
+ *
+ * Desactiva en vez de borrar, y la fila inactiva es DELIBERADAMENTE
+ * permanente: el NOT EXISTS de applyLinks mira todas las filas del par, sin
+ * importar `active`, así que el validador no volverá a proponer este vínculo.
+ * Es lo que se quiere — un rechazo humano no debe deshacerse solo en la
+ * siguiente corrida.
+ *
+ * Para re-ligar un par revocado hay dos caminos: un veredicto `approved`
+ * (que gana antes de evaluar reglas), o la vinculación manual desde la app.
  */
+/**
+ * Reactiva un link revocado.
+ *
+ * Necesario porque el NOT EXISTS de applyLinks ignora `active`: sin esto, un
+ * par rechazado y luego aprobado por un humano nunca podría volver a ligarse.
+ * Devuelve true si había una fila inactiva que reactivar.
+ */
+export async function reactivateLink(documentId: number, folioPid: string): Promise<boolean> {
+  const rows = await appDb<{ id: number }[]>`
+    UPDATE comercial_document_links
+    SET active = 1
+    WHERE active = 0
+      AND document_id = ${documentId}
+      AND linked_pid = ${folioPid}
+    RETURNING id
+  `;
+
+  if (rows.length > 0) {
+    await validatorDb`
+      UPDATE applied_links
+      SET active = 1, revoked_at = NULL
+      WHERE document_id = ${documentId} AND folio_pid = ${folioPid}
+    `;
+  }
+
+  return rows.length > 0;
+}
+
 export async function revokeLink(documentId: number, folioPid: string): Promise<boolean> {
   const rows = await appDb<{ id: number }[]>`
     UPDATE comercial_document_links

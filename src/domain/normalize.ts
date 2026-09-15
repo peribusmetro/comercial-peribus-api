@@ -61,9 +61,11 @@ export function extractEcoNumbers(value: string | null | undefined): EcoExtracti
     found.add(`${match[1]}-${match[2].padStart(3, '0')}`);
   }
 
+  // Confianza media: el eco venía embebido en texto libre, no como valor
+  // limpio del campo. Se reconoció, pero la captura no fue estricta.
   return {
     ecoNumbers: [...found],
-    confidence: found.size > 0 ? 'medium' : 'medium',
+    confidence: 'medium',
     mentionsStock,
   };
 }

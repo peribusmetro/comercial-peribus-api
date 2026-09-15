@@ -53,10 +53,16 @@ export const validatorDb: PgClient =
 export const appDb: PgClient =
   globalThis.__appDb ?? createClient(env.APP_DATABASE_URL, 'app');
 
-if (env.NODE_ENV !== 'production') {
-  globalThis.__validatorDb = validatorDb;
-  globalThis.__appDb = appDb;
-}
+// Se cachea SIEMPRE, incluido producción.
+//
+// El idiom de Next (`if (NODE_ENV !== 'production')`) existe para que el HMR
+// de desarrollo no acumule clientes; aquí el problema es el contrario. En
+// Vercel el módulo se evalúa una vez por cold start, y el globalThis es lo que
+// permite reutilizar el pool entre invocaciones de la misma instancia tibia.
+// Sin esto se crean pools huérfanos que nadie cierra y que agotan el pooler
+// de Supabase.
+globalThis.__validatorDb = validatorDb;
+globalThis.__appDb = appDb;
 
 /** Cierra ambos pools. Solo para CLI/tests; en Vercel no se llama. */
 export async function closeConnections(): Promise<void> {

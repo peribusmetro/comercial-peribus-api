@@ -4,7 +4,7 @@ import { validatorDb } from '@/db/clients';
 import { computeFingerprint } from '@/domain/rules';
 import { RULE_CODES, type StagedDocument } from '@/domain/types';
 import { recordVerdict } from '@/services/verdicts';
-import { revokeLink } from '@/services/link-applier';
+import { reactivateLink, revokeLink } from '@/services/link-applier';
 import { asyncHandler } from '../middleware';
 
 /**
@@ -208,13 +208,21 @@ reviewRouter.post(
       sourceFingerprint: fingerprint,
     });
 
-    // Un rechazo sobre un par ya ligado revoca el vínculo en la app.
+    // Un rechazo revoca el vínculo; una aprobación reactiva uno revocado
+    // antes (el NOT EXISTS del aplicador ignora `active`, así que sin esto
+    // un par rechazado y luego aprobado nunca volvería a ligarse).
     let linkRevoked = false;
-    if (input.verdict === 'rejected' && input.folioPid) {
-      linkRevoked = await revokeLink(input.documentId, input.folioPid);
+    let linkReactivated = false;
+
+    if (input.folioPid) {
+      if (input.verdict === 'rejected') {
+        linkRevoked = await revokeLink(input.documentId, input.folioPid);
+      } else if (input.verdict === 'approved') {
+        linkReactivated = await reactivateLink(input.documentId, input.folioPid);
+      }
     }
 
-    res.status(201).json({ verdict, linkRevoked });
+    res.status(201).json({ verdict, linkRevoked, linkReactivated });
   }),
 );
 
