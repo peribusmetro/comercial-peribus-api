@@ -50,3 +50,4 @@ coverage/
 logs/
 *.log
 *.bak
+vercel-env*.txt

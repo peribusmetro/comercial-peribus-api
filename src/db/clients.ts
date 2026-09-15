@@ -35,9 +35,16 @@ function createClient(url: string, label: string): PgClient {
     // Obligatorio con el pooler de Supabase en modo transacción:
     // los prepared statements no sobreviven entre conexiones del pool.
     prepare: false,
-    max: 3,
+    // Un endpoint puede lanzar varias consultas en paralelo (p. ej.
+    // /anomalies/stats hace 4). Con un pool más chico que esa cifra, las
+    // sobrantes esperan una conexión libre y la petición se cuelga.
+    max: 8,
     idle_timeout: 20,
     connect_timeout: 15,
+    // Si una consulta se atora, falla en vez de colgar la petición completa.
+    // Sin esto, agotar el pool se manifiesta como un timeout del cliente sin
+    // ninguna pista del origen.
+    timeout: 45,
     onnotice: () => {
       /* silenciamos los NOTICE de Postgres, son ruido en logs */
     },
