@@ -16,10 +16,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "db:migrate": "tsx src/db/migrate.ts",
-    "etl:documents": "tsx src/cli/run-etl.ts documents",
-    "etl:movements": "tsx src/cli/run-etl.ts movements",
-    "etl:catalogs": "tsx src/cli/run-etl.ts catalogs",
-    "audit:dry-run": "tsx src/cli/audit-dry-run.ts"
+    "check:coverage": "tsx src/cli/check-coverage.ts",
+    "etl": "tsx src/cli/run-etl.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.94.1",
