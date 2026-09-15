@@ -5,7 +5,7 @@
     "moduleResolution": "node",
     "lib": ["ES2023"],
     "outDir": "./dist",
-    "rootDir": "./src",
+    "rootDir": "./",
     "baseUrl": "./",
     "paths": {
       "@/*": ["src/*"]
@@ -23,6 +23,6 @@
     "sourceMap": true,
     "declaration": false
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dist"]
+  "include": ["src/**/*.ts", "api/**/*.ts"],
+  "exclude": ["node_modules", "dist", "src/**/*.test.ts"]
 }
