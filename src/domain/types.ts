@@ -1,12 +1,19 @@
 /** Tipos compartidos del dominio del validador. */
 
-export type RuleCode =
-  | 'R1_UNIT_MISMATCH'
-  | 'R2_STOCK_PURCHASE'
-  | 'R3_MULTI_UNIT'
-  | 'R4_LATE_RELINK'
-  | 'R5_AMBIGUOUS_FOLIO'
-  | 'R6_DUPLICATE_MAJOR_PART';
+/**
+ * Códigos de regla. Fuente única de verdad: se usan para tipar, para validar
+ * la entrada de los endpoints y deben coincidir con la tabla validation_rules.
+ */
+export const RULE_CODES = [
+  'R1_UNIT_MISMATCH',
+  'R2_STOCK_PURCHASE',
+  'R3_MULTI_UNIT',
+  'R4_LATE_RELINK',
+  'R5_AMBIGUOUS_FOLIO',
+  'R6_DUPLICATE_MAJOR_PART',
+] as const;
+
+export type RuleCode = (typeof RULE_CODES)[number];
 
 export type Severity = 'high' | 'medium' | 'low';
 

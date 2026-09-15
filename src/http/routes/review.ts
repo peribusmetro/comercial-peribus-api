@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { validatorDb } from '@/db/clients';
 import { computeFingerprint } from '@/domain/rules';
-import type { StagedDocument } from '@/domain/types';
+import { RULE_CODES, type StagedDocument } from '@/domain/types';
 import { recordVerdict } from '@/services/verdicts';
 import { revokeLink } from '@/services/link-applier';
 import { asyncHandler } from '../middleware';
@@ -139,7 +139,9 @@ const verdictBody = z.object({
   verdict: z.enum(['approved', 'rejected', 'corrected']),
   correctedToPid: z.string().min(1).nullable().optional(),
   scope: z.enum(['this_pair', 'document', 'rule_for_folio']).default('this_pair'),
-  ruleCodes: z.array(z.string()).default([]),
+  // Se validan contra los códigos reales: un typo en el nombre de una regla
+  // crearía una exención que nunca aplica, y nadie se daría cuenta.
+  ruleCodes: z.array(z.enum(RULE_CODES)).default([]),
   // Obligatoria a propósito: en seis meses alguien va a preguntar por qué
   // este gasto quedó en este folio, y la respuesta tiene que estar escrita.
   reason: z.string().min(3, 'La razón es obligatoria'),
@@ -200,7 +202,7 @@ reviewRouter.post(
       verdict: input.verdict,
       correctedToPid: input.correctedToPid ?? null,
       scope: input.scope,
-      ruleCodes: input.ruleCodes as never[],
+      ruleCodes: input.ruleCodes,
       reason: input.reason,
       reviewedBy: input.reviewedBy,
       sourceFingerprint: fingerprint,

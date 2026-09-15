@@ -26,8 +26,12 @@ declare global {
 }
 
 function createClient(url: string, label: string): PgClient {
+  // Supabase exige TLS; un Postgres local de desarrollo o pruebas no lo tiene.
+  // Se detecta por la URL en vez de exigir configuración extra.
+  const isLocal = /@(localhost|127\.0\.0\.1)[:/]/.test(url) || url.includes('sslmode=disable');
+
   return postgres(url, {
-    ssl: 'require',
+    ssl: isLocal ? false : 'require',
     // Obligatorio con el pooler de Supabase en modo transacción:
     // los prepared statements no sobreviven entre conexiones del pool.
     prepare: false,

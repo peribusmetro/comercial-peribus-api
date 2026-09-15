@@ -1,5 +1,10 @@
 import { validatorDb } from '@/db/clients';
 import type { RuleCode } from '@/domain/types';
+import { verdictKey, type Verdict, type VerdictKind, type VerdictScope } from '@/domain/verdict-logic';
+
+// La lógica de decisión vive en domain/ (pura, testeable sin base de datos).
+export { applyVerdict, verdictKey } from '@/domain/verdict-logic';
+export type { Verdict, VerdictKind, VerdictScope } from '@/domain/verdict-logic';
 
 /**
  * Veredictos humanos: la memoria del validador.
@@ -13,23 +18,6 @@ import type { RuleCode } from '@/domain/types';
  * de coincidir y el veredicto caduca solo. Un "aprobado" no puede tapar para
  * siempre un documento que después se convirtió en otra cosa.
  */
-
-export type VerdictKind = 'approved' | 'rejected' | 'corrected';
-export type VerdictScope = 'this_pair' | 'document' | 'rule_for_folio';
-
-export interface Verdict {
-  id: number;
-  documentId: number;
-  folioPid: string | null;
-  verdict: VerdictKind;
-  correctedToPid: string | null;
-  scope: VerdictScope;
-  ruleCodes: RuleCode[];
-  reason: string;
-  reviewedBy: string;
-  reviewedAt: Date;
-  sourceFingerprint: string;
-}
 
 export interface CreateVerdictInput {
   documentId: number;
@@ -152,57 +140,6 @@ export async function fetchActiveVerdicts(
   }
 
   return result;
-}
-
-export function verdictKey(documentId: number, folioPid: string | null): string {
-  return `${documentId}::${folioPid ?? '*'}`;
-}
-
-/**
- * Decide qué hacer con un par (documento, folio) según los veredictos vigentes.
- *
- * Respeta el alcance:
- *   this_pair      → solo aplica a ese folio exacto
- *   document       → aplica al documento contra cualquier folio
- *   rule_for_folio → perdona ciertas reglas en ese folio
- */
-export function applyVerdict(
-  documentId: number,
-  folioPid: string | null,
-  verdicts: Map<string, Verdict>,
-): { decision: 'link' | 'skip' | 'evaluate'; verdict?: Verdict; forgivenRules: Set<RuleCode> } {
-  const forgiven = new Set<RuleCode>();
-
-  const exact = verdicts.get(verdictKey(documentId, folioPid));
-  const documentWide = verdicts.get(verdictKey(documentId, null));
-
-  for (const candidate of [exact, documentWide]) {
-    if (!candidate) continue;
-
-    if (candidate.scope === 'document' || candidate.scope === 'this_pair') {
-      if (candidate.verdict === 'approved') {
-        return { decision: 'link', verdict: candidate, forgivenRules: forgiven };
-      }
-      if (candidate.verdict === 'rejected') {
-        return { decision: 'skip', verdict: candidate, forgivenRules: forgiven };
-      }
-      if (candidate.verdict === 'corrected') {
-        // El humano mandó el documento a otro folio: aquí no va.
-        const goesElsewhere = candidate.correctedToPid !== folioPid;
-        return {
-          decision: goesElsewhere ? 'skip' : 'link',
-          verdict: candidate,
-          forgivenRules: forgiven,
-        };
-      }
-    }
-
-    if (candidate.scope === 'rule_for_folio') {
-      for (const code of candidate.ruleCodes) forgiven.add(code);
-    }
-  }
-
-  return { decision: 'evaluate', forgivenRules: forgiven };
 }
 
 /** Veredictos de alcance `rule_for_folio` que perdonan reglas en un folio completo. */
