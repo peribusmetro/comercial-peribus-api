@@ -1,93 +1,111 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guía para Claude Code al trabajar en este repositorio.
 
-## Comandos de Desarrollo
+## Qué es este proyecto
 
-### Construcción y Ejecución
+Servicio **validador** entre AdminPAQ (SQL Server) y `peribus-incidents-admin`.
+No es un CRUD ni un proxy: trae documentos del ERP a su propia base, los
+analiza contra un motor de reglas, y solo asigna a folios de mantenimiento los
+que no presentan anomalías. El resto queda en cuarentena para revisión humana.
+
+El contexto completo del problema está en `README.md`.
+
+## Comandos
+
 ```bash
-npm run build                # Compilar el proyecto
-npm run start                # Iniciar en modo producción
-npm run start:dev            # Iniciar en modo desarrollo con watch
-npm run start:debug          # Iniciar con debugger y watch
-```
+npm run dev              # servidor con recarga (tsx watch)
+npm run build            # tsc + tsc-alias + copia de .sql
+npm start                # producción (dist/src/server.js)
+npm test                 # vitest
+npm run typecheck        # tsc --noEmit
+npm run lint             # eslint --fix
 
-### Testing
-```bash
-npm run test                 # Ejecutar tests unitarios
-npm run test:watch           # Ejecutar tests en modo watch
-npm run test:cov             # Ejecutar tests con cobertura
-npm run test:e2e             # Ejecutar tests end-to-end
-npm run test:debug           # Ejecutar tests con debugger
-```
-
-### Calidad de Código
-```bash
-npm run lint                 # Ejecutar ESLint con auto-fix
-npm run format               # Formatear código con Prettier
+npm run db:migrate       # aplica migraciones a la DB del validador
+npm run check:coverage   # diagnóstico de cobertura del campo unidad
+npm run etl <paso>       # documents | movements | catalogs | all
 ```
 
 ## Arquitectura
 
-### Framework y Stack
-- **Framework**: NestJS 11 con TypeScript
-- **Base de datos**: PostgreSQL (Supabase) con TypeORM
-- **Puerto por defecto**: 3000 (configurable vía `process.env.PORT`)
-- **Arquitectura**: Modular basada en controladores, servicios y módulos de NestJS
+```
+src/
+  config/env.ts          validación de entorno con zod; falla al arrancar
+  db/
+    clients.ts           dos pools: validatorDb (propia) y appDb (la de la app)
+    migrate.ts           runner de migraciones
+    migrations/*.sql     esquema y semillas
+  domain/                NÚCLEO — funciones puras, sin I/O
+    normalize.ts         parseo de folios, ecos y timestamps de AdminPAQ
+    rules.ts             las 6 reglas + fingerprint
+    types.ts
+  etl/
+    sqlserver.ts         acceso SOLO LECTURA a AdminPAQ
+    sync.ts              ETL por pasos, idempotente
+  services/
+    validator.ts         orquestador de la validación
+    folio-resolver.ts    resuelve folios contra la DB de la app
+    verdicts.ts          memoria de decisiones humanas
+    link-applier.ts      ÚNICO módulo que escribe en la DB de la app
+  http/
+    middleware.ts        auth, logging, errores
+    routes/              review, anomalies, internal
+  cli/                   scripts de terminal
+api/index.ts             punto de entrada de Vercel
+```
 
-### Configuración de TypeScript
-- **Target**: ES2023 con módulos NodeNext
-- **Modo estricto activado**: `strictNullChecks`, `noImplicitAny`, `strictBindCallApply`
-- **Decoradores experimentales**: Habilitados para NestJS
-- **Source maps**: Habilitados para debugging
+## Reglas del proyecto
 
-### Estructura del Proyecto
-- `src/`: Código fuente principal
-  - `main.ts`: Punto de entrada de la aplicación (incluye validación global y CORS)
-  - `app.module.ts`: Módulo raíz de la aplicación (incluye configuración de TypeORM y ConfigModule)
-  - `app.controller.ts`: Controlador principal
-  - `app.service.ts`: Servicio principal
-  - `config/`: Archivos de configuración
-    - `database.config.ts`: Configuración de TypeORM para Supabase
-    - `supabase.config.ts`: Configuración del cliente de Supabase
-  - `scripts/`: Scripts de utilidad para consultar la base de datos
-- `test/`: Tests end-to-end
-- `dist/`: Salida de compilación (generado)
+**AdminPAQ es de solo lectura.** Todo acceso a SQL Server es `SELECT`. El ERP
+es la fuente de verdad contable y este servicio nunca le escribe.
 
-### Base de Datos y Supabase
-- **ORM**: TypeORM configurado para PostgreSQL
-- **Conexión**:
-  - Las credenciales se configuran en archivo `.env` (nunca commitear este archivo)
-  - Ver `.env.example` para las variables requeridas
-  - SSL habilitado por defecto para conexión con Supabase
-- **Entidades**:
-  - Deben crearse con decorador `@Entity()` de TypeORM
-  - Ubicarlas en sus respectivos módulos o en `src/common/` para uso compartido
-  - Usar `*.entity.ts` como sufijo de archivo
-  - TypeORM sincroniza automáticamente en desarrollo (`synchronize: true`)
-- **Migraciones**: En producción desactivar `synchronize` y usar migraciones de TypeORM
+**`src/domain/` no hace I/O.** Las reglas son funciones puras: reciben datos,
+devuelven anomalías. Sin base de datos, sin `env`, sin red. Es lo que permite
+probarlas con casos reales y razonar sobre cada una por separado. Si una regla
+necesita un umbral, entra como parámetro.
 
-### Variables de Entorno
-Configurar en archivo `.env` (copiar desde `.env.example`):
-- `SUPABASE_URL`: URL del proyecto de Supabase
-- `SUPABASE_KEY`: Anon/Public key de Supabase
-- `DB_HOST`: Host de PostgreSQL (formato: `db.xxx.supabase.co`)
-- `DB_PORT`: Puerto de PostgreSQL (por defecto 5432)
-- `DB_USERNAME`: Usuario de la base de datos (por defecto `postgres`)
-- `DB_PASSWORD`: Contraseña de la base de datos
-- `DB_NAME`: Nombre de la base de datos (por defecto `postgres`)
+**Solo `link-applier.ts` escribe en `appDb`.** Cualquier otra escritura a la
+base de la app debe pasar por ahí. Todo lo demás es lectura.
 
-### Testing
-- **Framework**: Jest 30
-- **Configuración**:
-  - Tests unitarios buscan archivos `*.spec.ts` en `src/`
-  - Tests e2e usan configuración separada en `test/jest-e2e.json`
-  - Cobertura se genera en directorio `coverage/`
+**Dos claves de API distintas.** `API_KEYS` para lectura/revisión (las usa la
+app Next); `INTERNAL_API_KEY` para `/internal/*`. Si se filtra una clave de
+lectura, no debe poder disparar el ETL ni modificar vínculos.
 
-### Validación
-- **Validación global activada** en `main.ts` usando `ValidationPipe`
-- **class-validator** y **class-transformer** instalados
-- **Configuración**:
-  - `whitelist: true` - Remueve propiedades no definidas en el DTO
-  - `forbidNonWhitelisted: true` - Lanza error si hay propiedades extra
-  - `transform: true` - Transforma payloads a instancias de DTO
+**Los endpoints internos responden 202.** `pg_net` y Vercel tienen timeouts
+cortos. El trabajo sigue en segundo plano y el seguimiento se hace por
+`sync_runs`, no por la respuesta HTTP.
+
+**Modo `audit` por defecto.** No escribe links, solo detecta. Cambiar a
+`enforce` es una decisión explícita.
+
+## Detalles de AdminPAQ que importan
+
+- `CTIMESTAMP` es **texto** `MM/DD/YYYY`, no una fecha. Comparar con
+  `CONVERT(DATETIME, CTIMESTAMP, 101)`.
+- `'12/30/1899 00:00:00:000'` es el centinela de "sin valor".
+- Solo `admDocumentos` y `admExistenciaCosto` tienen `CTIMESTAMP`. El resto se
+  sincroniza comparando IDs.
+- Los campos libres se capturan a mano: `tp-1`, `M--250814-54`,
+  `260602-94 260611-5`, `AP-119 COSTO X KILOMETRO`. Los normalizadores de
+  `src/domain/normalize.ts` replican la lógica de la app
+  (`features/comercial/utils/`). **Si se cambia aquí, hay que cambiarlo allá.**
+
+## Consistencia con la app
+
+`comercial_document_links` vive en el Supabase de `peribus-incidents-admin`,
+no en la base del validador: tiene FK a `maintenances.id` y más de veinte
+consultas de la app le hacen JOIN directo.
+
+La unidad de un folio se resuelve por `maintenances → incidents → units`
+(LEFT JOIN: un mantenimiento puede no tener incidente).
+
+Al insertar links, el `NOT EXISTS` mira **todas** las filas del par
+(documento, folio), activas o no. Una fila con `active = 0` significa que
+alguien desvinculó a mano porque el folio del ERP estaba mal; volver a ligarlo
+desharía esa corrección.
+
+## Fuera de alcance
+
+Los **siniestros**. La tabla `accidents` está vacía y la FK apunta ahí; los
+siniestros reales viven en `incident_types` con `pid 'S-%'`. Habilitarlos
+requiere una migración del lado de la app.

@@ -1,98 +1,239 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# comercial-peribus-api
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Servicio intermedio entre **AdminPAQ** (SQL Server) y **peribus-incidents-admin**.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+No es un proxy de datos: es un **validador**. Trae los documentos del ERP a su
+propia base, los analiza, y solo asigna a folios de mantenimiento aquellos que
+no presentan anomalías. Lo que no pasa la revisión queda en cuarentena y se
+reporta para que compras lo corrija.
 
-## Description
+---
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## El problema que resuelve
 
-## Project setup
+El auto-link anterior ligaba un documento a un folio con solo empatar el texto
+de `extra_text_three`. Sin verificar nada más. Eso produjo casos como el folio
+`M-260723-67`:
 
-```bash
-$ npm install
+- **$73,108** acumulados entre 13 documentos
+- Documentos de las unidades **AP-057** y **AP-084** en un folio de **AP-087**
+- Una **compra a stock de $30,064.95** cargada íntegra al folio
+- **Tres clutchs distintos** (códigos `MTO-1319`, `MTO-0037`, `MTO-0947`)
+
+Como los tres clutchs tenían códigos diferentes, ningún detector de duplicados
+exactos los veía: el sistema reportaba `duplicate_count: 0`.
+
+---
+
+## Arquitectura
+
+```
+SQL Server (AdminPAQ)          ← solo lectura, nunca se le escribe
+        │
+        ▼
+  ETL por pasos
+        │
+        ▼
+DB propia del validador        ← staging, anomalías, cuarentena, veredictos
+        │
+        ▼
+  Motor de reglas
+        │
+   ┌────┴────┐
+ limpio   sospechoso
+   │          │
+   ▼          ▼
+Supabase   cuarentena  →  la app Next lo muestra  →  compras corrige
+de la app                                              en AdminPAQ
+(links)
 ```
 
-## Compile and run the project
+`comercial_document_links` se queda en el Supabase de la app —no se muda a la
+base del validador— porque tiene FK a `maintenances.id` y más de veinte
+consultas de la app le hacen JOIN directo. El validador es el único que la
+escribe.
+
+---
+
+## Las reglas
+
+| Código | Regla | Acción | Origen |
+|---|---|---|---|
+| **R1** | Unidad del documento ≠ unidad del folio | cuarentena | COMDU 6771 (TP-062) en folio de TP-082 |
+| **R2** | Compra a stock / almacén | cuarentena | FP10181, $30,064.95 |
+| **R3** | Documento con varias unidades | cuarentena | "AP-035, AP-100 STOCK" |
+| **R4** | Folio modificado semanas después | marca | capturado 24 jul, modificado 28 ago |
+| **R5** | Folio sin prefijo M-/S- | marca | `260715-29` |
+| **R6** | Dos piezas mayores del mismo grupo | cuarentena | 3 clutchs en M-260723-67 |
+
+**R1 es la regla principal.** Un folio pertenece a una unidad; si el documento
+declara otra, no es su gasto. Es determinista, sin umbrales ni estadística.
+
+**Cuarentena** significa que el documento **no se liga**. El folio queda con el
+gasto incompleto pero limpio, en vez de completo pero inflado.
+
+**R6 retiene el grupo completo**, no "el más probable": cuando hay tres clutchs,
+la regla sabe que algo está mal pero no cuál es el bueno. En `M-260723-67`
+ninguno de los tres lo era.
+
+---
+
+## Memoria de decisiones
+
+Cuando alguien revisa un caso en la app y da el visto bueno, queda escrito en
+`review_verdicts` y el validador **no lo vuelve a marcar**.
+
+El veredicto se ata al `source_fingerprint` del documento (unidad, folio, total,
+productos). Si compras lo edita en AdminPAQ, la huella cambia y el veredicto
+**caduca solo**. Un "aprobado" no puede tapar para siempre un documento que
+después se convirtió en otra cosa.
+
+Alcances:
+- `this_pair` — solo ese documento con ese folio
+- `document` — ese documento contra cualquier folio
+- `rule_for_folio` — perdona una regla en todo el folio (ej. "este autobús sí
+  llevó dos clutchs, fue reparación mayor")
+
+---
+
+## Puesta en marcha
+
+### 1. Configurar el entorno
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+cp .env.example .env
 ```
 
-## Run tests
+Llenar:
+- `VALIDATOR_DATABASE_URL` — Postgres del validador (proyecto Supabase aparte).
+  Usar la URL del **pooler** (puerto 6543), no la directa.
+- `APP_DATABASE_URL` — Postgres de peribus-incidents-admin.
+- `SQL_SERVER_*` — credenciales de AdminPAQ.
+- `API_KEYS` — claves de lectura, las usa la app Next.
+- `INTERNAL_API_KEY` — clave aparte, solo para el cron.
+
+### 2. Crear el esquema
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+npm install
+npm run db:migrate
 ```
 
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+### 3. Diagnóstico previo (importante)
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+npm run check:coverage
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+Mide qué porcentaje de documentos trae unidad reconocible en el ERP. **R1 y R3
+dependen por completo de ese dato.** Si la cobertura es baja, hay que reforzar
+la captura antes de confiar en el validador. Solo lee, no escribe nada.
 
-## Resources
+### 4. Primera carga
 
-Check out a few resources that may come in handy when working with NestJS:
+```bash
+npm run etl documents -- --full
+npm run etl movements
+npm run etl catalogs
+```
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+### 5. Auditoría
 
-## Support
+El modo por defecto es `audit`: detecta y reporta **sin escribir links**.
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+```bash
+npm run dev
+curl -X POST -H "X-API-Key: $INTERNAL_API_KEY" \
+  "http://localhost:3000/internal/run?step=validate"
 
-## Stay in touch
+curl -H "X-API-Key: $API_KEY" http://localhost:3000/anomalies/stats
+```
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+Eso da el número para llevar a compras: cuántos folios están afectados y cuánto
+dinero representa.
 
-## License
+### 6. Pasar a enforce
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+Cuando las reglas estén calibradas, cambiar `VALIDATOR_MODE=enforce`. A partir
+de ahí el validador escribe los links y aplica la cuarentena.
+
+---
+
+## Endpoints
+
+### Revisión (requieren `API_KEYS`)
+
+| Método | Ruta | Para qué |
+|---|---|---|
+| `GET` | `/review/pending` | Bandeja de casos por revisar |
+| `GET` | `/review/folio/:pid` | Todo lo detectado en un folio |
+| `POST` | `/review/verdict` | Registrar una decisión humana |
+| `GET` | `/review/history/:documentId` | Historial de un documento |
+
+### Anomalías (requieren `API_KEYS`)
+
+| Método | Ruta | Para qué |
+|---|---|---|
+| `GET` | `/anomalies/stats` | Resumen agregado (el reporte para compras) |
+| `GET` | `/anomalies/document/:id` | Banderas de un documento |
+| `GET` | `/anomalies/flags?documentIds=1,2,3` | Banderas en lote, para la tabla |
+| `GET` | `/anomalies/runs` | Historial de corridas |
+
+### Internos (requieren `INTERNAL_API_KEY`)
+
+| Método | Ruta | Para qué |
+|---|---|---|
+| `POST` | `/internal/run?step=documents\|movements\|catalogs\|validate` | Dispara un paso |
+| `GET` | `/internal/status` | Estado de la última corrida de cada paso |
+
+Los pasos responden **202 de inmediato** y trabajan en segundo plano: `pg_net`
+y las funciones de Vercel tienen timeouts cortos. El seguimiento real se hace
+por `sync_runs`, no por la respuesta HTTP.
+
+---
+
+## Despliegue
+
+### Vercel
+
+```bash
+vercel --prod
+```
+
+Configurar las variables de entorno en el panel. **La API necesita alcanzar el
+SQL Server de AdminPAQ**; hoy eso funciona porque el host es público en el
+puerto 1433 (es como corre el sync actual desde GitHub Actions).
+
+### Cron de Supabase
+
+Ver `supabase/cron.sql`. Agenda cuatro pasos a partir de las 03:00 MX
+(09:00 UTC), separados 5 minutos. Las credenciales van en Vault, no en texto
+plano.
+
+---
+
+## Desarrollo
+
+```bash
+npm run dev          # servidor con recarga
+npm test             # 54 tests del motor de reglas
+npm run typecheck    # verificación de tipos
+npm run build        # compila a dist/
+```
+
+Las reglas (`src/domain/rules.ts`) son **funciones puras**: sin base de datos,
+sin variables de entorno. Se prueban con los casos reales documentados en
+`src/domain/rules.test.ts`.
+
+---
+
+## Notas
+
+**Siniestros fuera de alcance.** La tabla `accidents` de la app está vacía y la
+FK de `comercial_document_links` apunta ahí. Los siniestros reales viven en
+`incident_types` con `pid 'S-%'`. Habilitarlos requiere una migración del lado
+de la app.
+
+**El ERP no se modifica.** Todo el acceso a AdminPAQ es `SELECT`. Las
+correcciones las hace compras en el ERP, y el validador las detecta en la
+siguiente corrida.
