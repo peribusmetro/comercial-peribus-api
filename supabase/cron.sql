@@ -95,6 +95,16 @@ SELECT cron.schedule(
   $$ SELECT public.trigger_validator_step('catalogs') $$
 );
 
+-- El paso de validación evalúa como máximo 5,000 documentos por corrida
+-- (el default de `loadStagedDocuments`, en src/services/validator.ts), tomando
+-- los más recientes por fecha. No pagina ni marca lo ya evaluado, así que esta
+-- corrida diaria revisa siempre la cola reciente; para el día a día alcanza,
+-- porque lo que cambia es justamente lo último sincronizado.
+--
+-- Lo que NO hace es cubrir el histórico: al 17-sep-2026 hay 20,399 documentos
+-- con folio, de modo que una auditoría completa se corre aparte por CLI con un
+-- límite mayor. Si algún día se quiere que el cron barra todo, hay que darle
+-- paginación al validador, no solo subir el límite.
 SELECT cron.schedule(
   'validador-4-validacion',
   '15 9 * * *',                      -- 03:15 MX

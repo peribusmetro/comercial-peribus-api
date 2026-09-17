@@ -45,13 +45,27 @@ anomaliesRouter.get(
       validatorDb<
         { total_anomalies: string; affected_folios: string; affected_documents: string; amount_at_risk: string }[]
       >`
+        -- El monto se suma sobre documentos distintos, no sobre importes
+        -- distintos. Un documento puede tener varias anomalías (R1 y R6 a la
+        -- vez, por ejemplo) y contarlo dos veces inflaría la cifra; de ahí el
+        -- DISTINCT. Pero aplicarlo al importe —SUM(DISTINCT d.total), como
+        -- estaba— descarta documentos que casualmente cuestan lo mismo: al
+        -- 17-sep-2026 eran 9 importes repetidos y $23,892.97 que no se
+        -- reportaban. El DISTINCT va en el documento, y la suma después.
         SELECT
-          COUNT(*)                                AS total_anomalies,
-          COUNT(DISTINCT a.folio_pid)             AS affected_folios,
-          COUNT(DISTINCT a.document_id)           AS affected_documents,
-          COALESCE(SUM(DISTINCT d.total), 0)      AS amount_at_risk
+          COUNT(*)                        AS total_anomalies,
+          COUNT(DISTINCT a.folio_pid)     AS affected_folios,
+          COUNT(DISTINCT a.document_id)   AS affected_documents,
+          COALESCE((
+            SELECT SUM(d.total)
+            FROM (
+              SELECT DISTINCT a2.document_id
+              FROM anomalies a2
+              WHERE a2.active = 1 AND a2.resolved_at IS NULL
+            ) docs
+            JOIN adm_documents d ON d.document_id = docs.document_id
+          ), 0)                           AS amount_at_risk
         FROM anomalies a
-        LEFT JOIN adm_documents d ON d.document_id = a.document_id
         WHERE a.active = 1 AND a.resolved_at IS NULL
       `,
       validatorDb`

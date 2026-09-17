@@ -142,20 +142,77 @@ npm run etl catalogs
 El modo por defecto es `audit`: detecta y reporta **sin escribir links**.
 
 ```bash
-npm run dev
 curl -X POST -H "X-API-Key: $INTERNAL_API_KEY" \
-  "http://localhost:3000/internal/run?step=validate"
+  "$API_URL/internal/run?step=validate"
 
-curl -H "X-API-Key: $API_KEY" http://localhost:3000/anomalies/stats
+curl -H "X-API-Key: $API_KEY" "$API_URL/anomalies/stats"
 ```
 
 Eso da el número para llevar a compras: cuántos folios están afectados y cuánto
 dinero representa.
 
+**Ojo con el alcance de una corrida.** El paso `validate` evalúa como máximo
+5,000 documentos, los más recientes por fecha, y no pagina. Para auditar el
+histórico completo hay que pasar un límite mayor, que el endpoint no expone:
+
+```ts
+import { runValidation } from './src/services/validator';
+await runValidation({ limit: 25000, mode: 'audit' });
+```
+
 ### 6. Pasar a enforce
 
 Cuando las reglas estén calibradas, cambiar `VALIDATOR_MODE=enforce`. A partir
 de ahí el validador escribe los links y aplica la cuarentena.
+
+---
+
+## Estado de la puesta en marcha
+
+Al **17 de septiembre de 2026**, corrido contra el AdminPAQ de producción y
+desplegado en Vercel. Modo `audit`: **no se ha escrito ningún link todavía**.
+
+### Cobertura del ERP (`npm run check:coverage`)
+
+53,708 documentos no cancelados. De los 20,398 que traen folio capturado:
+
+| Dato | Cobertura | Implicación |
+|---|---|---|
+| Unidad reconocible | **92.2%** | **R1 es viable** — la regla principal se puede aplicar |
+| Folio sin prefijo | 57.6% | R5 lo marca, no lo pone en cuarentena |
+| Declara varias unidades | 1.1% | alcance de R3 |
+| Menciona stock/almacén | 0.4% | alcance de R2 |
+
+El 57.6% de folios ambiguos es alto pero no bloquea: se interpretan como
+mantenimiento (`folio-resolver` solo resuelve `M-`) y quedan marcados para
+revisión humana.
+
+### Resultado de la auditoría
+
+20,399 documentos evaluados, 15,387 pares documento-folio:
+
+| Regla | Casos | Folios | Monto |
+|---|---|---|---|
+| R5 — folio ambiguo | 317 | 239 | $964,880 |
+| R4 — re-ligado tardío | 77 | 76 | $246,890 |
+| R1 — unidad discordante | **31** | 29 | $51,387 |
+| R3 — documento multi-unidad | **24** | 24 | $197,360 |
+| R6 — pieza mayor duplicada | 18 | 16 | $157,509 |
+| R2 — compra a stock | **2** | 2 | $60,130 |
+
+**253 folios afectados**, 254 documentos y **$679,170 en riesgo** (suma de los
+documentos distintos con anomalía; los montos por regla de arriba no se pueden
+sumar entre sí, porque un documento puede infringir varias). En cuarentena: 75;
+marcados: 394.
+
+El caso fundacional `M-260723-67` **ya no aparece**: sus 12 documentos ahora
+declaran todos `AP-087`, la unidad correcta. Compras lo corrigió en el ERP y el
+validador lo confirma — que es exactamente el ciclo que se buscaba.
+
+### Falta
+
+- Agendar el cron de Supabase (`supabase/cron.sql`); hoy nada corre solo.
+- Calibrar con compras y decidir el paso a `enforce`.
 
 ---
 
