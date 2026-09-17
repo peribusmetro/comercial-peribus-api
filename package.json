@@ -19,7 +19,8 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "check:coverage": "tsx src/cli/check-coverage.ts",
     "etl": "tsx src/cli/run-etl.ts",
-    "verify:deploy": "tsx src/cli/verify-deploy.ts"
+    "verify:deploy": "tsx src/cli/verify-deploy.ts",
+    "setup:cron": "tsx src/cli/setup-cron.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.94.1",

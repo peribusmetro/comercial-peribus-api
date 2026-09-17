@@ -209,9 +209,34 @@ El caso fundacional `M-260723-67` **ya no aparece**: sus 12 documentos ahora
 declaran todos `AP-087`, la unidad correcta. Compras lo corrigió en el ERP y el
 validador lo confirma — que es exactamente el ciclo que se buscaba.
 
+### Cron agendado
+
+Los cuatro pasos corren solos a partir de las **03:00 MX** (09:00 UTC),
+separados 5 minutos. Se instalaron con:
+
+```bash
+npm run setup:cron -- https://tu-api.vercel.app --dry-run   # ver qué haría
+npm run setup:cron -- https://tu-api.vercel.app             # aplicar
+```
+
+| Job | Hora | Paso |
+|---|---|---|
+| `validador-1-documentos` | 03:00 MX | `documents` |
+| `validador-2-movimientos` | 03:05 MX | `movements` |
+| `validador-3-catalogos` | 03:10 MX | `catalogs` |
+| `validador-4-validacion` | 03:15 MX | `validate` |
+
+El script es idempotente —correrlo de nuevo actualiza en vez de duplicar— y
+deja la URL y la clave interna en Vault, nunca en `cron.job.command`, que es
+legible por cualquiera que pueda consultar esa tabla. La función
+`trigger_validator_step` queda restringida: `anon` y `authenticated` no pueden
+invocarla.
+
+Verificado end-to-end: la función alcanza la API (202), pg_cron dispara por sí
+solo (`status=succeeded`) y la corrida aparece completa en `sync_runs`.
+
 ### Falta
 
-- Agendar el cron de Supabase (`supabase/cron.sql`); hoy nada corre solo.
 - Calibrar con compras y decidir el paso a `enforce`.
 
 ---
