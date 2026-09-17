@@ -72,9 +72,36 @@ function parseEnv(): AppEnv {
   return parsed.data;
 }
 
-export const env = parseEnv();
+/**
+ * Entorno validado, resuelto de forma perezosa.
+ *
+ * La validación sigue siendo estricta —una variable faltante hace fallar— pero
+ * el error se lanza al *usar* `env`, no al importar el módulo. La diferencia
+ * importa en serverless: con la validación en el import, un solo valor mal
+ * puesto tumbaba la función completa y hasta `/health` devolvía un 500 opaco,
+ * justo cuando más falta hace poder preguntar qué está mal. Ahora el fallo
+ * queda acotado a quien de verdad necesita la configuración.
+ *
+ * El resultado se memoiza: se valida una vez por proceso, no por acceso.
+ */
+let cachedEnv: AppEnv | undefined;
 
-export const isProduction = env.NODE_ENV === 'production';
+export function getEnv(): AppEnv {
+  cachedEnv ??= parseEnv();
+  return cachedEnv;
+}
+
+export const env: AppEnv = new Proxy({} as AppEnv, {
+  get: (_target, prop) => getEnv()[prop as keyof AppEnv],
+  has: (_target, prop) => prop in getEnv(),
+  ownKeys: () => Reflect.ownKeys(getEnv()),
+  getOwnPropertyDescriptor: (_target, prop) =>
+    Reflect.getOwnPropertyDescriptor(getEnv(), prop),
+});
+
+export function isProduction(): boolean {
+  return getEnv().NODE_ENV === 'production';
+}
 
 /**
  * Credenciales de SQL Server, exigidas solo cuando se va a correr el ETL.

@@ -6,10 +6,6 @@
     "lib": ["ES2023"],
     "outDir": "./dist",
     "rootDir": "./",
-    "baseUrl": "./",
-    "paths": {
-      "@/*": ["src/*"]
-    },
     "strict": true,
     "strictNullChecks": true,
     "noImplicitAny": true,

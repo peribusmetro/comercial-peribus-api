@@ -1,4 +1,4 @@
-import { appDb, validatorDb } from '@/db/clients';
+import { appDb, validatorDb } from '../db/clients';
 
 /**
  * Aplicador de links.

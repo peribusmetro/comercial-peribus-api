@@ -1,5 +1,5 @@
 import { createApp } from './app';
-import { env } from '@/config/env';
+import { env } from './config/env';
 
 /**
  * Arranque local. En Vercel el punto de entrada es `api/index.ts`, que monta

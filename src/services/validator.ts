@@ -1,8 +1,8 @@
-import { validatorDb } from '@/db/clients';
-import { env } from '@/config/env';
-import { extractFolios } from '@/domain/normalize';
-import { computeFingerprint, evaluateDocument, type MajorPartGroup } from '@/domain/rules';
-import type { DetectedAnomaly, RuleCode, StagedDocument } from '@/domain/types';
+import { validatorDb } from '../db/clients';
+import { env } from '../config/env';
+import { extractFolios } from '../domain/normalize';
+import { computeFingerprint, evaluateDocument, type MajorPartGroup } from '../domain/rules';
+import type { DetectedAnomaly, RuleCode, StagedDocument } from '../domain/types';
 import {
   fetchExistingLinks,
   fetchFolioPartTallies,

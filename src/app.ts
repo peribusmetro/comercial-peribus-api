@@ -1,5 +1,5 @@
 import express, { type Express } from 'express';
-import { env } from '@/config/env';
+import { env } from './config/env';
 import {
   errorHandler,
   requestLogger,
@@ -24,11 +24,28 @@ export function createApp(): Express {
   app.use(requestLogger);
 
   // Health check público: sin secretos ni consultas a base.
+  //
+  // El modo se lee aquí dentro y no al construir la app: si la validación de
+  // entorno falla, `env` lanza al importarse y con ello se cae la función
+  // entera —incluido este endpoint, que es justo el que sirve para averiguar
+  // qué pasó—. Leerlo dentro del handler deja que /health siga respondiendo y
+  // diga cuál es el problema, en vez de un 500 opaco.
   app.get('/health', (_req, res) => {
-    res.json({
-      status: 'ok',
+    let mode: string;
+    let configError: string | undefined;
+
+    try {
+      mode = env.VALIDATOR_MODE;
+    } catch (error) {
+      mode = 'desconocido';
+      configError = error instanceof Error ? error.message : String(error);
+    }
+
+    res.status(configError ? 503 : 200).json({
+      status: configError ? 'error de configuración' : 'ok',
       service: 'comercial-peribus-api',
-      mode: env.VALIDATOR_MODE,
+      mode,
+      ...(configError ? { configError } : {}),
       timestamp: new Date().toISOString(),
     });
   });

@@ -1,10 +1,10 @@
-import { validatorDb } from '@/db/clients';
-import type { RuleCode } from '@/domain/types';
-import { verdictKey, type Verdict, type VerdictKind, type VerdictScope } from '@/domain/verdict-logic';
+import { validatorDb } from '../db/clients';
+import type { RuleCode } from '../domain/types';
+import { verdictKey, type Verdict, type VerdictKind, type VerdictScope } from '../domain/verdict-logic';
 
 // La lógica de decisión vive en domain/ (pura, testeable sin base de datos).
-export { applyVerdict, verdictKey } from '@/domain/verdict-logic';
-export type { Verdict, VerdictKind, VerdictScope } from '@/domain/verdict-logic';
+export { applyVerdict, verdictKey } from '../domain/verdict-logic';
+export type { Verdict, VerdictKind, VerdictScope } from '../domain/verdict-logic';
 
 /**
  * Veredictos humanos: la memoria del validador.

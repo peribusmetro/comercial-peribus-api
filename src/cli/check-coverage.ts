@@ -1,5 +1,5 @@
-import { closeSqlServerPool, measureUnitCoverage, fetchDocumentsSince } from '@/etl/sqlserver';
-import { extractEcoNumbers, extractFolios } from '@/domain/normalize';
+import { closeSqlServerPool, measureUnitCoverage, fetchDocumentsSince } from '../etl/sqlserver';
+import { extractEcoNumbers, extractFolios } from '../domain/normalize';
 
 /**
  * Diagnóstico previo a confiar en el validador.

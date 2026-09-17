@@ -1,5 +1,5 @@
-import { appDb } from '@/db/clients';
-import type { FolioContext, LinkType } from '@/domain/types';
+import { appDb } from '../db/clients';
+import type { FolioContext, LinkType } from '../domain/types';
 
 /**
  * Resuelve folios contra el Supabase de la app.

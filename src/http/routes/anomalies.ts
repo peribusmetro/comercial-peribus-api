@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { validatorDb } from '@/db/clients';
+import { validatorDb } from '../../db/clients';
 import { asyncHandler } from '../middleware';
 
 /**

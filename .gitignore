@@ -51,3 +51,6 @@ logs/
 *.log
 *.bak
 vercel-env*.txt
+
+# Vercel: `vercel link` crea .vercel/ y un .env.local con el token de OIDC.
+.vercel

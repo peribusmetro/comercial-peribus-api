@@ -1,5 +1,5 @@
 import postgres from 'postgres';
-import { env } from '@/config/env';
+import { env } from '../config/env';
 
 /**
  * Dos conexiones distintas, a propósito:
@@ -41,37 +41,89 @@ function createClient(url: string, label: string): PgClient {
     max: 8,
     idle_timeout: 20,
     connect_timeout: 15,
-    // Si una consulta se atora, falla en vez de colgar la petición completa.
-    // Sin esto, agotar el pool se manifiesta como un timeout del cliente sin
-    // ninguna pista del origen.
-    timeout: 45,
     onnotice: () => {
       /* silenciamos los NOTICE de Postgres, son ruido en logs */
     },
     connection: {
       application_name: `comercial-validator:${label}`,
     },
+    // Nota sobre el límite por consulta:
+    //
+    // Antes había aquí un `timeout: 45` con la intención de cortar consultas
+    // atoradas. No hacía eso: en `postgres` esa opción es un alias deprecado
+    // de `idle_timeout`, así que lo único que lograba era pisar el
+    // `idle_timeout: 20` de arriba y dejar las conexiones ociosas 45s.
+    //
+    // No se sustituyó por `statement_timeout` porque el pooler de Supabase en
+    // modo transacción lo ignora: se probaron las tres vías (la opción
+    // `connection`, `options=-c` en la URL y el default) y las tres siguen
+    // reportando los 2min del servidor. El límite real hoy lo pone el servidor,
+    // no este cliente; si hace falta bajarlo, se cambia del lado de Supabase.
   });
 }
 
-export const validatorDb: PgClient =
-  globalThis.__validatorDb ?? createClient(env.VALIDATOR_DATABASE_URL, 'validator');
+/**
+ * Los pools se crean al primer uso, no al importar el módulo.
+ *
+ * Importar `clients` ya no abre conexiones ni exige que el entorno sea válido:
+ * eso permite que rutas que no tocan la base —`/health`— sigan respondiendo
+ * aunque la configuración esté mal, en vez de tumbar la función completa.
+ *
+ * Se cachea SIEMPRE en globalThis, incluido producción. El idiom de Next
+ * (`if (NODE_ENV !== 'production')`) existe para que el HMR de desarrollo no
+ * acumule clientes; aquí el problema es el contrario. En Vercel el módulo se
+ * evalúa una vez por cold start, y el globalThis es lo que permite reutilizar
+ * el pool entre invocaciones de la misma instancia tibia. Sin esto se crean
+ * pools huérfanos que nadie cierra y que agotan el pooler de Supabase.
+ */
+function getValidatorDb(): PgClient {
+  globalThis.__validatorDb ??= createClient(env.VALIDATOR_DATABASE_URL, 'validator');
+  return globalThis.__validatorDb;
+}
 
-export const appDb: PgClient =
-  globalThis.__appDb ?? createClient(env.APP_DATABASE_URL, 'app');
+function getAppDb(): PgClient {
+  globalThis.__appDb ??= createClient(env.APP_DATABASE_URL, 'app');
+  return globalThis.__appDb;
+}
 
-// Se cachea SIEMPRE, incluido producción.
-//
-// El idiom de Next (`if (NODE_ENV !== 'production')`) existe para que el HMR
-// de desarrollo no acumule clientes; aquí el problema es el contrario. En
-// Vercel el módulo se evalúa una vez por cold start, y el globalThis es lo que
-// permite reutilizar el pool entre invocaciones de la misma instancia tibia.
-// Sin esto se crean pools huérfanos que nadie cierra y que agotan el pooler
-// de Supabase.
-globalThis.__validatorDb = validatorDb;
-globalThis.__appDb = appDb;
+// Se exponen como proxies para no tocar los llamados existentes: el cliente de
+// `postgres` se usa como función etiquetada (validatorDb de backtick) y también
+// por métodos (.begin, .unsafe, .end). El proxy cubre ambas formas y abre la
+// conexión en el primer acceso real, no al importar el módulo.
+function lazyClient(resolve: () => PgClient): PgClient {
+  return new Proxy(function () {} as unknown as PgClient, {
+    apply: (_target, _thisArg, args) => {
+      const client = resolve() as unknown as (...a: unknown[]) => unknown;
+      return client(...args);
+    },
+    get: (_target, prop) => {
+      const client = resolve();
+      const value = (client as unknown as Record<string | symbol, unknown>)[prop];
+      // Los métodos se atan al cliente real: invocarlos a través del proxy
+      // dejaría `this` apuntando al target vacío.
+      return typeof value === 'function'
+        ? (value as (...a: unknown[]) => unknown).bind(client)
+        : value;
+    },
+    has: (_target, prop) => prop in resolve(),
+  });
+}
 
-/** Cierra ambos pools. Solo para CLI/tests; en Vercel no se llama. */
+export const validatorDb: PgClient = lazyClient(getValidatorDb);
+
+export const appDb: PgClient = lazyClient(getAppDb);
+
+/**
+ * Cierra ambos pools. Solo para CLI/tests; en Vercel no se llama.
+ *
+ * Solo cierra lo que llegó a abrirse: si un comando nunca tocó la base de la
+ * app, no tiene caso instanciar su pool únicamente para cerrarlo.
+ */
 export async function closeConnections(): Promise<void> {
-  await Promise.allSettled([validatorDb.end(), appDb.end()]);
+  const open = [globalThis.__validatorDb, globalThis.__appDb].filter(
+    (client): client is PgClient => client !== undefined,
+  );
+  await Promise.allSettled(open.map((client) => client.end()));
+  globalThis.__validatorDb = undefined;
+  globalThis.__appDb = undefined;
 }

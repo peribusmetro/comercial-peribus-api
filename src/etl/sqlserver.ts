@@ -1,5 +1,5 @@
 import sql from 'mssql';
-import { requireSqlServerConfig } from '@/config/env';
+import { requireSqlServerConfig } from '../config/env';
 
 /**
  * Acceso de SOLO LECTURA a AdminPAQ.

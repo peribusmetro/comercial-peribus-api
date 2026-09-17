@@ -1,5 +1,5 @@
-import { validatorDb } from '@/db/clients';
-import { parseAdminPaqTimestamp } from '@/domain/normalize';
+import { validatorDb } from '../db/clients';
+import { parseAdminPaqTimestamp } from '../domain/normalize';
 import {
   fetchAllConcepts,
   fetchAllProducts,

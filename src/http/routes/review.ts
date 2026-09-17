@@ -1,10 +1,10 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { validatorDb } from '@/db/clients';
-import { computeFingerprint } from '@/domain/rules';
-import { RULE_CODES, type StagedDocument } from '@/domain/types';
-import { recordVerdict } from '@/services/verdicts';
-import { reactivateLink, revokeLink } from '@/services/link-applier';
+import { validatorDb } from '../../db/clients';
+import { computeFingerprint } from '../../domain/rules';
+import { RULE_CODES, type StagedDocument } from '../../domain/types';
+import { recordVerdict } from '../../services/verdicts';
+import { reactivateLink, revokeLink } from '../../services/link-applier';
 import { asyncHandler } from '../middleware';
 
 /**

@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
-import { env } from '@/config/env';
+import { env } from '../config/env';
 
 /**
  * Comparación en tiempo constante.
@@ -102,8 +102,19 @@ export function errorHandler(
 
   if (res.headersSent) return;
 
+  // `env` puede lanzar: si lo que falló fue justamente la configuración, leer
+  // NODE_ENV aquí volvería a explotar *dentro* del manejador de errores y
+  // Express respondería con su página HTML por defecto, filtrando el stack
+  // trace al cliente. Ante la duda se asume producción: se calla el detalle.
+  let esProduccion = true;
+  try {
+    esProduccion = env.NODE_ENV === 'production';
+  } catch {
+    /* configuración inválida: se mantiene el criterio conservador */
+  }
+
   res.status(500).json({
     error: 'Error interno',
-    ...(env.NODE_ENV === 'production' ? {} : { detail: message }),
+    ...(esProduccion ? {} : { detail: message }),
   });
 }

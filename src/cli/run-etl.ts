@@ -1,5 +1,5 @@
-import { closeConnections } from '@/db/clients';
-import { closeSqlServerPool } from '@/etl/sqlserver';
+import { closeConnections } from '../db/clients';
+import { closeSqlServerPool } from '../etl/sqlserver';
 import {
   finishRun,
   startRun,
@@ -8,7 +8,7 @@ import {
   syncMovements,
   type StepResult,
   type SyncStep,
-} from '@/etl/sync';
+} from '../etl/sync';
 
 /**
  * Ejecuta un paso del ETL desde la terminal.

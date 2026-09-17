@@ -1,10 +1,10 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { validatorDb } from '@/db/clients';
-import { finishRun, startRun, syncCatalogs, syncDocuments, syncMovements } from '@/etl/sync';
-import { closeSqlServerPool } from '@/etl/sqlserver';
-import { runValidation } from '@/services/validator';
-import { env } from '@/config/env';
+import { validatorDb } from '../../db/clients';
+import { finishRun, startRun, syncCatalogs, syncDocuments, syncMovements } from '../../etl/sync';
+import { closeSqlServerPool } from '../../etl/sqlserver';
+import { runValidation } from '../../services/validator';
+import { env } from '../../config/env';
 import { asyncHandler } from '../middleware';
 
 /**
