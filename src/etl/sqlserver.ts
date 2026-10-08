@@ -1,11 +1,17 @@
 import sql from 'mssql';
 import { requireSqlServerConfig } from '../config/env';
+import { chunk } from './ingest-logic';
+import type { RawRow } from './tables';
 
 /**
  * Acceso de SOLO LECTURA a AdminPAQ.
  *
  * Regla del proyecto: el ERP es la fuente de verdad contable y este servicio
  * nunca le escribe. Todas las funciones de este módulo son SELECT.
+ *
+ * Las consultas son genéricas (tabla + columnas) porque la ingesta recorre
+ * las 9 tablas del registro (`tables.ts`) con la misma estrategia. Los
+ * nombres de tabla y columna vienen del registro, nunca de una petición.
  */
 
 let pool: sql.ConnectionPool | null = null;
@@ -24,169 +30,131 @@ export async function closeSqlServerPool(): Promise<void> {
   }
 }
 
-/** Fila cruda de admDocumentos, con los nombres originales de AdminPAQ. */
-export interface RawDocument {
-  CIDDOCUMENTO: number;
-  CIDCONCEPTODOCUMENTO: number | null;
-  CSERIEDOCUMENTO: string | null;
-  CFOLIO: number | null;
-  CFECHA: Date | null;
-  CIDCLIENTEPROVEEDOR: number | null;
-  CRAZONSOCIAL: string | null;
-  CRFC: string | null;
-  CREFERENCIA: string | null;
-  COBSERVACIONES: string | null;
-  CNATURALEZA: number | null;
-  CCANCELADO: number | null;
-  CNETO: number | null;
-  CIMPUESTO1: number | null;
-  CTOTAL: number | null;
-  CIDMONEDA: number | null;
-  CTIPOCAMBIO: number | null;
-  CUSUARIO: string | null;
-  CTEXTOEXTRA1: string | null;
-  CTEXTOEXTRA2: string | null;
-  CTEXTOEXTRA3: string | null;
-  CTIMESTAMP: string | null;
+/** Centinela de AdminPAQ para "sin fecha" en CTIMESTAMP (texto). */
+const TIMESTAMP_SENTINEL = '12/30/1899 00:00:00:000';
+
+/** Solo letras, números y guion bajo: lo que puede ser un identificador de AdminPAQ. */
+function assertIdentifier(name: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    throw new Error(`Identificador SQL inválido: "${name}"`);
+  }
+  return name;
 }
 
-export interface RawMovement {
-  CIDMOVIMIENTO: number;
-  CIDDOCUMENTO: number;
-  CNUMEROMOVIMIENTO: number | null;
-  CIDPRODUCTO: number | null;
-  CIDALMACEN: number | null;
-  CUNIDADES: number | null;
-  CPRECIO: number | null;
-  CNETO: number | null;
-  CTOTAL: number | null;
-  CREFERENCIA: string | null;
-  COBSERVAMOV: string | null;
-  CFECHA: Date | null;
-  CTEXTOEXTRA1: string | null;
+function columnList(columns: readonly string[]): string {
+  return columns.map(assertIdentifier).join(', ');
 }
 
-export interface RawProduct {
-  CIDPRODUCTO: number;
-  CCODIGOPRODUCTO: string | null;
-  CNOMBREPRODUCTO: string | null;
-  CTIPOPRODUCTO: number | null;
-  CSTATUSPRODUCTO: number | null;
-  CDESCRIPCIONPRODUCTO: string | null;
-  CCLAVESAT: string | null;
-  CPRECIO1: number | null;
-  CIDUNIDADBASE: number | null;
+/** Todos los ids de una tabla del ERP (para faltantes y borrados). */
+export async function fetchIds(
+  erpTable: string,
+  erpKey: string,
+): Promise<number[]> {
+  const p = await getSqlServerPool();
+  const result = await p
+    .request()
+    .query<Record<string, number>>(
+      `SELECT ${assertIdentifier(erpKey)} FROM ${assertIdentifier(erpTable)}`,
+    );
+  return result.recordset.map((r) => Number(r[erpKey]));
 }
 
-export interface RawConcept {
-  CIDCONCEPTODOCUMENTO: number;
-  CCODIGOCONCEPTO: string | null;
-  CNOMBRECONCEPTO: string | null;
-  CNATURALEZA: number | null;
-  CTIPOFOLIO: number | null;
+/** Tabla completa (carga inicial o tablas chicas). */
+export async function fetchAllRows(
+  erpTable: string,
+  columns: readonly string[],
+): Promise<RawRow[]> {
+  const p = await getSqlServerPool();
+  const result = await p
+    .request()
+    .query<RawRow>(
+      `SELECT ${columnList(columns)} FROM ${assertIdentifier(erpTable)}`,
+    );
+  return result.recordset;
 }
 
 /**
- * Documentos modificados o creados desde una fecha.
+ * Filas cuya columna `filterColumn` está en `values`, por lotes.
  *
- * CTIMESTAMP en AdminPAQ es TEXTO en formato MM/DD/YYYY, no un tipo fecha.
- * Hay que convertirlo con estilo 101 para comparar, y descartar el centinela
- * '12/30/1899' que AdminPAQ usa como "sin valor".
+ * Los valores son enteros validados: nunca se interpola texto crudo. SQL
+ * Server admite listas IN largas, pero se parte en lotes de 1,000 para que
+ * cada consulta sea predecible.
  */
-export async function fetchDocumentsSince(since: Date | null): Promise<RawDocument[]> {
-  const pool = await getSqlServerPool();
+export async function fetchRowsWhereIn(
+  erpTable: string,
+  columns: readonly string[],
+  filterColumn: string,
+  values: readonly number[],
+): Promise<RawRow[]> {
+  const ids = values.filter((v) => Number.isInteger(v));
+  if (ids.length === 0) return [];
 
-  const columns = `
-    CIDDOCUMENTO, CIDCONCEPTODOCUMENTO, CSERIEDOCUMENTO, CFOLIO, CFECHA,
-    CIDCLIENTEPROVEEDOR, CRAZONSOCIAL, CRFC, CREFERENCIA, COBSERVACIONES,
-    CNATURALEZA, CCANCELADO, CNETO, CIMPUESTO1, CTOTAL, CIDMONEDA,
-    CTIPOCAMBIO, CUSUARIO, CTEXTOEXTRA1, CTEXTOEXTRA2, CTEXTOEXTRA3, CTIMESTAMP
-  `;
+  const p = await getSqlServerPool();
+  const table = assertIdentifier(erpTable);
+  const column = assertIdentifier(filterColumn);
+  const cols = columnList(columns);
 
-  if (!since) {
-    const result = await pool.request().query<RawDocument>(
-      `SELECT ${columns} FROM admDocumentos`,
-    );
-    return result.recordset;
+  const out: RawRow[] = [];
+  for (const batch of chunk(ids, 1000)) {
+    const result = await p
+      .request()
+      .query<RawRow>(
+        `SELECT ${cols} FROM ${table} WHERE ${column} IN (${batch.join(',')})`,
+      );
+    out.push(...result.recordset);
   }
+  return out;
+}
 
-  // MM/DD/YYYY es el formato que espera CONVERT con estilo 101.
-  const sinceText = `${String(since.getMonth() + 1).padStart(2, '0')}/${String(
-    since.getDate(),
-  ).padStart(2, '0')}/${since.getFullYear()}`;
-
-  const result = await pool
+/**
+ * Filas modificadas desde un CTIMESTAMP conocido (inclusive).
+ *
+ * CTIMESTAMP en AdminPAQ es TEXTO en formato MM/DD/YYYY HH:MM:SS:mmm, no un
+ * tipo fecha. Hay que convertirlo con estilo 101 para comparar y descartar
+ * el centinela '12/30/1899'. Se usa >= y no >: re-leer las filas con el
+ * mismo timestamp es barato y evita perder cambios del mismo instante.
+ */
+export async function fetchRowsModifiedSince(
+  erpTable: string,
+  columns: readonly string[],
+  sinceTimestamp: string,
+): Promise<RawRow[]> {
+  const p = await getSqlServerPool();
+  const result = await p
     .request()
-    .input('since', sql.VarChar(20), sinceText)
-    .query<RawDocument>(`
-      SELECT ${columns}
-      FROM admDocumentos
+    .input('since', sql.VarChar(40), sinceTimestamp)
+    .input('sentinel', sql.VarChar(40), TIMESTAMP_SENTINEL).query<RawRow>(`
+      SELECT ${columnList(columns)}
+      FROM ${assertIdentifier(erpTable)}
       WHERE CTIMESTAMP IS NOT NULL
         AND CTIMESTAMP <> ''
-        AND CTIMESTAMP <> '12/30/1899 00:00:00:000'
+        AND CTIMESTAMP <> @sentinel
         AND CONVERT(DATETIME, CTIMESTAMP, 101) >= CONVERT(DATETIME, @since, 101)
     `);
-
   return result.recordset;
 }
 
-/** IDs de todos los documentos vivos en el ERP (para detectar borrados). */
-export async function fetchAllDocumentIds(): Promise<number[]> {
-  const pool = await getSqlServerPool();
-  const result = await pool
+/**
+ * Id + columnas de texto libre de las filas que tienen alguna no vacía.
+ *
+ * Es la consulta barata que permite detectar ediciones de CTEXTOEXTRA* sin
+ * CTIMESTAMP: se compara en memoria contra staging.
+ */
+export async function fetchDriftColumns(
+  erpTable: string,
+  erpKey: string,
+  driftColumns: readonly string[],
+): Promise<RawRow[]> {
+  const p = await getSqlServerPool();
+  const cols = driftColumns.map(assertIdentifier);
+  const where = cols
+    .map((c) => `(${c} IS NOT NULL AND ${c} <> '')`)
+    .join(' OR ');
+  const result = await p
     .request()
-    .query<{ CIDDOCUMENTO: number }>('SELECT CIDDOCUMENTO FROM admDocumentos');
-  return result.recordset.map((r) => r.CIDDOCUMENTO);
-}
-
-/** Movimientos de un lote de documentos. */
-export async function fetchMovementsForDocuments(
-  documentIds: number[],
-): Promise<RawMovement[]> {
-  if (documentIds.length === 0) return [];
-
-  const pool = await getSqlServerPool();
-
-  // Los ids son enteros validados por tipo, pero se sanean de todos modos:
-  // nunca se interpola texto crudo en una consulta.
-  const safeIds = documentIds
-    .filter((id) => Number.isInteger(id))
-    .map((id) => String(id))
-    .join(',');
-
-  if (!safeIds) return [];
-
-  const result = await pool.request().query<RawMovement>(`
-    SELECT
-      CIDMOVIMIENTO, CIDDOCUMENTO, CNUMEROMOVIMIENTO, CIDPRODUCTO, CIDALMACEN,
-      CUNIDADES, CPRECIO, CNETO, CTOTAL, CREFERENCIA, COBSERVAMOV, CFECHA,
-      CTEXTOEXTRA1
-    FROM admMovimientos
-    WHERE CIDDOCUMENTO IN (${safeIds})
-  `);
-
-  return result.recordset;
-}
-
-export async function fetchAllProducts(): Promise<RawProduct[]> {
-  const pool = await getSqlServerPool();
-  const result = await pool.request().query<RawProduct>(`
-    SELECT
-      CIDPRODUCTO, CCODIGOPRODUCTO, CNOMBREPRODUCTO, CTIPOPRODUCTO,
-      CSTATUSPRODUCTO, CDESCRIPCIONPRODUCTO, CCLAVESAT, CPRECIO1, CIDUNIDADBASE
-    FROM admProductos
-  `);
-  return result.recordset;
-}
-
-export async function fetchAllConcepts(): Promise<RawConcept[]> {
-  const pool = await getSqlServerPool();
-  const result = await pool.request().query<RawConcept>(`
-    SELECT
-      CIDCONCEPTODOCUMENTO, CCODIGOCONCEPTO, CNOMBRECONCEPTO,
-      CNATURALEZA, CTIPOFOLIO
-    FROM admConceptos
-  `);
+    .query<RawRow>(
+      `SELECT ${assertIdentifier(erpKey)}, ${cols.join(', ')} FROM ${assertIdentifier(erpTable)} WHERE ${where}`,
+    );
   return result.recordset;
 }
 
@@ -203,9 +171,9 @@ export async function measureUnitCoverage(): Promise<{
   withUnitOne: number;
   withAnyUnit: number;
 }> {
-  const pool = await getSqlServerPool();
+  const p = await getSqlServerPool();
 
-  const result = await pool.request().query<{
+  const result = await p.request().query<{
     total: number;
     with_folio: number;
     with_unit_two: number;

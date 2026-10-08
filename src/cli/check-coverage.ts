@@ -1,4 +1,8 @@
-import { closeSqlServerPool, measureUnitCoverage, fetchDocumentsSince } from '../etl/sqlserver';
+import {
+  closeSqlServerPool,
+  measureUnitCoverage,
+  fetchAllRows,
+} from '../etl/sqlserver';
 import { extractEcoNumbers, extractFolios } from '../domain/normalize';
 
 /**
@@ -31,17 +35,40 @@ async function main(): Promise<void> {
   // 1. Conteos globales, resueltos del lado de SQL Server.
   const coverage = await measureUnitCoverage();
 
-  console.log('Documentos NO cancelados:', coverage.total.toLocaleString('es-MX'));
+  console.log(
+    'Documentos NO cancelados:',
+    coverage.total.toLocaleString('es-MX'),
+  );
   console.log();
-  console.log(`  Con folio (extra_text_three)   ${bar(coverage.withFolio, coverage.total)}  ${pct(coverage.withFolio, coverage.total)}`);
-  console.log(`  Con unidad (extra_text_two)    ${bar(coverage.withUnitTwo, coverage.total)}  ${pct(coverage.withUnitTwo, coverage.total)}`);
-  console.log(`  Con texto en extra_text_one    ${bar(coverage.withUnitOne, coverage.total)}  ${pct(coverage.withUnitOne, coverage.total)}`);
-  console.log(`  Con alguna unidad              ${bar(coverage.withAnyUnit, coverage.total)}  ${pct(coverage.withAnyUnit, coverage.total)}`);
+  console.log(
+    `  Con folio (extra_text_three)   ${bar(coverage.withFolio, coverage.total)}  ${pct(coverage.withFolio, coverage.total)}`,
+  );
+  console.log(
+    `  Con unidad (extra_text_two)    ${bar(coverage.withUnitTwo, coverage.total)}  ${pct(coverage.withUnitTwo, coverage.total)}`,
+  );
+  console.log(
+    `  Con texto en extra_text_one    ${bar(coverage.withUnitOne, coverage.total)}  ${pct(coverage.withUnitOne, coverage.total)}`,
+  );
+  console.log(
+    `  Con alguna unidad              ${bar(coverage.withAnyUnit, coverage.total)}  ${pct(coverage.withAnyUnit, coverage.total)}`,
+  );
   console.log();
 
   // 2. Muestreo: tener texto no es lo mismo que tener un eco reconocible.
   console.log('Analizando el contenido real de los campos…\n');
-  const docs = await fetchDocumentsSince(null);
+  const docs = (await fetchAllRows('admDocumentos', [
+    'CIDDOCUMENTO',
+    'CCANCELADO',
+    'CTEXTOEXTRA1',
+    'CTEXTOEXTRA2',
+    'CTEXTOEXTRA3',
+  ])) as Array<{
+    CIDDOCUMENTO: number;
+    CCANCELADO: number | null;
+    CTEXTOEXTRA1: string | null;
+    CTEXTOEXTRA2: string | null;
+    CTEXTOEXTRA3: string | null;
+  }>;
 
   const withFolioText = docs.filter(
     (d) => d.CTEXTOEXTRA3 && d.CTEXTOEXTRA3.trim() !== '' && d.CCANCELADO === 0,
@@ -68,14 +95,28 @@ async function main(): Promise<void> {
 
   const base = withFolioText.length;
 
-  console.log(`Documentos con folio capturado: ${base.toLocaleString('es-MX')}\n`);
-  console.log(`  Folio interpretable            ${pct(parseableFolio, base)}  (${parseableFolio.toLocaleString('es-MX')})`);
-  console.log(`  Folio AMBIGUO (sin prefijo)    ${pct(ambiguousFolio, base)}  (${ambiguousFolio.toLocaleString('es-MX')})  → R5`);
-  console.log(`  Folio múltiple                 ${pct(multiFolio, base)}  (${multiFolio.toLocaleString('es-MX')})`);
+  console.log(
+    `Documentos con folio capturado: ${base.toLocaleString('es-MX')}\n`,
+  );
+  console.log(
+    `  Folio interpretable            ${pct(parseableFolio, base)}  (${parseableFolio.toLocaleString('es-MX')})`,
+  );
+  console.log(
+    `  Folio AMBIGUO (sin prefijo)    ${pct(ambiguousFolio, base)}  (${ambiguousFolio.toLocaleString('es-MX')})  → R5`,
+  );
+  console.log(
+    `  Folio múltiple                 ${pct(multiFolio, base)}  (${multiFolio.toLocaleString('es-MX')})`,
+  );
   console.log();
-  console.log(`  Unidad reconocible             ${pct(resolvableUnit, base)}  (${resolvableUnit.toLocaleString('es-MX')})  → viabilidad de R1`);
-  console.log(`  Declara varias unidades        ${pct(multiUnit, base)}  (${multiUnit.toLocaleString('es-MX')})  → R3`);
-  console.log(`  Menciona stock/almacén         ${pct(stockMentions, base)}  (${stockMentions.toLocaleString('es-MX')})  → R2`);
+  console.log(
+    `  Unidad reconocible             ${pct(resolvableUnit, base)}  (${resolvableUnit.toLocaleString('es-MX')})  → viabilidad de R1`,
+  );
+  console.log(
+    `  Declara varias unidades        ${pct(multiUnit, base)}  (${multiUnit.toLocaleString('es-MX')})  → R3`,
+  );
+  console.log(
+    `  Menciona stock/almacén         ${pct(stockMentions, base)}  (${stockMentions.toLocaleString('es-MX')})  → R2`,
+  );
   console.log();
 
   // 3. Veredicto sobre la viabilidad de la regla principal.
@@ -83,15 +124,27 @@ async function main(): Promise<void> {
 
   console.log('───────────────────────────────────────────────────────────');
   if (r1Viability >= 80) {
-    console.log(`✓ R1 es viable: ${r1Viability.toFixed(1)}% de los documentos con folio`);
-    console.log('  traen unidad reconocible. La regla principal puede aplicarse.');
+    console.log(
+      `✓ R1 es viable: ${r1Viability.toFixed(1)}% de los documentos con folio`,
+    );
+    console.log(
+      '  traen unidad reconocible. La regla principal puede aplicarse.',
+    );
   } else if (r1Viability >= 40) {
-    console.log(`⚠ R1 es parcial: solo ${r1Viability.toFixed(1)}% trae unidad reconocible.`);
-    console.log('  La regla sirve, pero dejará sin evaluar a buena parte de los');
+    console.log(
+      `⚠ R1 es parcial: solo ${r1Viability.toFixed(1)}% trae unidad reconocible.`,
+    );
+    console.log(
+      '  La regla sirve, pero dejará sin evaluar a buena parte de los',
+    );
     console.log('  documentos. Conviene reforzar la captura en el ERP.');
   } else {
-    console.log(`✗ R1 NO es viable hoy: solo ${r1Viability.toFixed(1)}% trae unidad.`);
-    console.log('  Hay que apoyarse en el eco de los movimientos o en la unidad');
+    console.log(
+      `✗ R1 NO es viable hoy: solo ${r1Viability.toFixed(1)}% trae unidad.`,
+    );
+    console.log(
+      '  Hay que apoyarse en el eco de los movimientos o en la unidad',
+    );
     console.log('  del folio antes de confiar en esta regla.');
   }
   console.log('───────────────────────────────────────────────────────────\n');
@@ -104,8 +157,12 @@ async function main(): Promise<void> {
       const folios = extractFolios(d.CTEXTOEXTRA3);
       const eco = extractEcoNumbers(d.CTEXTOEXTRA2 ?? d.CTEXTOEXTRA1);
       console.log(`  doc ${d.CIDDOCUMENTO}`);
-      console.log(`    folio ERP : ${JSON.stringify(d.CTEXTOEXTRA3)} → ${folios.candidates.map((c) => c.pid).join(', ') || '(no interpretable)'}`);
-      console.log(`    unidad    : ${JSON.stringify(d.CTEXTOEXTRA2)} → ${eco.ecoNumbers.join(', ') || '(no interpretable)'}`);
+      console.log(
+        `    folio ERP : ${JSON.stringify(d.CTEXTOEXTRA3)} → ${folios.candidates.map((c) => c.pid).join(', ') || '(no interpretable)'}`,
+      );
+      console.log(
+        `    unidad    : ${JSON.stringify(d.CTEXTOEXTRA2)} → ${eco.ecoNumbers.join(', ') || '(no interpretable)'}`,
+      );
     }
     console.log();
   }
@@ -115,7 +172,10 @@ main()
   .then(() => closeSqlServerPool())
   .then(() => process.exit(0))
   .catch(async (err) => {
-    console.error('\nError en el diagnóstico:', err instanceof Error ? err.message : err);
+    console.error(
+      '\nError en el diagnóstico:',
+      err instanceof Error ? err.message : err,
+    );
     await closeSqlServerPool().catch(() => undefined);
     process.exit(1);
   });
