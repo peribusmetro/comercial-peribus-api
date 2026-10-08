@@ -53,6 +53,33 @@ base del validador— porque tiene FK a `maintenances.id` y más de veinte
 consultas de la app le hacen JOIN directo. El validador es el único que la
 escribe.
 
+### Desde octubre de 2026: el validador también publica las tablas de la app
+
+La app lee sus propias tablas `comercial_adm_*` (9: documentos, movimientos,
+productos, conceptos, existencias/costos, timbres, costos históricos,
+almacenes, precios de compra). Antes las llenaba un GitHub Action que arrancaba
+con horas de retraso. Ahora las llena el validador, y es el **único**
+intermediario entre AdminPAQ y la app:
+
+```
+AdminPAQ ──ingest──► staging (adm_*, raw + hash) ──validate──► anomalías
+                                 │
+                                 └──publish──► comercial_adm_* de la app
+                                               · nueva / cambió sin vínculos → se escribe
+                                               · cambió / canceló / borró en origen
+                                                 y TIENE vínculos en la app   → se RETIENE
+                                                 → source_changes → la app decide
+```
+
+**La app manda sobre lo que ya decidió.** Si un documento tiene vínculos en la
+app (folio, asignación de movimientos o unidad) y cambia en el ERP, el
+publicador no lo pisa: lo retiene y abre un cambio de origen que la app muestra
+como "Modificado / Cancelado / Eliminado en origen" con dos salidas:
+*Sincronizar con origen* (la app recibe la versión del ERP; si fue cancelación
+o borrado se desactivan los vínculos) o *Mantener el mío*. Cambios en columnas
+sin importancia (CTIMESTAMP, usuario, serie/folio/referencia con ceros a la
+izquierda…) se publican en silencio.
+
 ---
 
 ## Las reglas
@@ -132,10 +159,32 @@ la captura antes de confiar en el validador. Solo lee, no escribe nada.
 ### 4. Primera carga
 
 ```bash
-npm run etl documents -- --full
-npm run etl movements
-npm run etl catalogs
+npm run etl ingest -- --full
 ```
+
+Trae las 9 tablas que la app lee (documentos, movimientos, productos,
+conceptos, existencias/costos, timbres, costos históricos, almacenes y precios
+de compra) a staging, con la fila completa del ERP en `raw` y su huella. Las
+corridas siguientes (`npm run etl ingest`, sin `--full`) son incrementales:
+ids faltantes, modificados por `CTIMESTAMP`, campos libres editados sin
+`CTIMESTAMP` y filas borradas del ERP (se marcan, no se borran).
+
+Medido en DEV el 2026-10-08: carga completa 365k filas en 188 s; incremental
+sin cambios en ~30 s.
+
+### 4b. Publicar en la app
+
+```bash
+npm run publish -- --dry-run    # qué insertaría, actualizaría o retendría
+npm run publish                 # staging → comercial_adm_* de la app
+```
+
+La primera publicación (bootstrap) recorre las 9 tablas completas: en DEV el
+2026-10-08 fueron 364,905 filas en 9.5 min, por CLI (no cabe en una función de
+Vercel; las corridas diarias sí: ~10 s). Como la app ya tenía las filas, lo
+que se retiene en el bootstrap son documentos vinculados cuya versión en la
+app difiere de la del ERP en algo significativo (montos, unidades, unidad,
+cancelación): salieron 8 reales de 55k.
 
 ### 5. Auditoría
 
@@ -211,20 +260,22 @@ validador lo confirma — que es exactamente el ciclo que se buscaba.
 
 ### Cron agendado
 
-Los cuatro pasos corren solos a partir de las **03:00 MX** (09:00 UTC),
-separados 5 minutos. Se instalaron con:
-
 ```bash
-npm run setup:cron -- https://tu-api.vercel.app --dry-run   # ver qué haría
-npm run setup:cron -- https://tu-api.vercel.app             # aplicar
+npm run setup:cron -- https://tu-api.vercel.app --dry-run              # ver qué haría
+npm run setup:cron -- https://tu-api.vercel.app                        # DEV (.env)
+npm run setup:cron -- https://tu-api.vercel.app --env .env.production  # PROD
 ```
 
-| Job | Hora | Paso |
+| Job | Hora MX | Qué hace |
 |---|---|---|
-| `validador-1-documentos` | 03:00 MX | `documents` |
-| `validador-2-movimientos` | 03:05 MX | `movements` |
-| `validador-3-catalogos` | 03:10 MX | `catalogs` |
-| `validador-4-validacion` | 03:15 MX | `validate` |
+| `validador-1-ingesta` | 01:30 | `ingest`: AdminPAQ → staging (9 tablas) |
+| `validador-2-validacion` | 02:00 | `validate`: reglas → anomalías |
+| `validador-3-publicacion` | 02:15 | `publish`: staging → app, con retención |
+| `validador-8-limpieza` | dom 04:00 | borra bitácoras viejas de pg_cron / pg_net |
+| `validador-9-alerta` | 06:00 | correo por Resend si un paso falló o no corrió (solo si `RESEND_API_KEY` y `ALERT_EMAILS` están en el .env al instalar) |
+
+Los jobs anteriores (`validador-1-documentos` … `validador-4-validacion`, 03:00
+MX) se dan de baja al instalar: `ingest` los sustituye.
 
 El script es idempotente —correrlo de nuevo actualiza en vez de duplicar— y
 deja la URL y la clave interna en Vault, nunca en `cron.job.command`, que es
@@ -261,11 +312,22 @@ solo (`status=succeeded`) y la corrida aparece completa en `sync_runs`.
 | `GET` | `/anomalies/flags?documentIds=1,2,3` | Banderas en lote, para la tabla |
 | `GET` | `/anomalies/runs` | Historial de corridas |
 
+### Cambios de origen (requieren `API_KEYS`)
+
+| Método | Ruta | Para qué |
+|---|---|---|
+| `GET` | `/changes/pending?documentIds=1,2,3` | Cambio pendiente por documento (columna ORIGEN) |
+| `GET` | `/changes/pending?page=1&pageSize=50&type=cancelled` | Bandeja paginada |
+| `GET` | `/changes/:id` | Detalle con el diff campo a campo (etiquetas en español) |
+| `POST` | `/changes/:id/sync` | La app recibe la versión del ERP; cancelación/borrado desactiva vínculos. Body: `{ resolvedBy, note? }` |
+| `POST` | `/changes/:id/keep` | La app conserva su versión; no se vuelve a avisar por esa misma versión |
+
 ### Internos (requieren `INTERNAL_API_KEY`)
 
 | Método | Ruta | Para qué |
 |---|---|---|
-| `POST` | `/internal/run?step=documents\|movements\|catalogs\|validate` | Dispara un paso |
+| `POST` | `/internal/run?step=ingest\|validate\|publish` (+ `&tables=admConceptos` en ingest/publish; `&full=true` en ingest) | Dispara un paso |
+| `POST` | `/internal/run?step=documents\|movements\|catalogs` | Subconjuntos históricos de `ingest` |
 | `GET` | `/internal/status` | Estado de la última corrida de cada paso |
 
 Los pasos responden **202 de inmediato** y trabajan en segundo plano: `pg_net`

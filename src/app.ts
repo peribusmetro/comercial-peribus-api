@@ -8,6 +8,7 @@ import {
 } from './http/middleware';
 import { reviewRouter } from './http/routes/review';
 import { anomaliesRouter } from './http/routes/anomalies';
+import { changesRouter } from './http/routes/changes';
 import { internalRouter } from './http/routes/internal';
 
 /**
@@ -53,6 +54,7 @@ export function createApp(): Express {
   // Endpoints de consulta y revisión: los usa la app Next.
   app.use('/review', requireApiKey, reviewRouter);
   app.use('/anomalies', requireApiKey, anomaliesRouter);
+  app.use('/changes', requireApiKey, changesRouter);
 
   // Endpoints internos: los dispara el cron de Supabase con una clave aparte.
   app.use('/internal', requireInternalKey, internalRouter);

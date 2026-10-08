@@ -1,8 +1,15 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { validatorDb } from '../../db/clients';
-import { finishRun, startRun, syncCatalogs, syncDocuments, syncMovements } from '../../etl/sync';
+import {
+  finishRun,
+  runSyncStep,
+  startRun,
+  stepSummary,
+  type SyncStep,
+} from '../../etl/sync';
 import { closeSqlServerPool } from '../../etl/sqlserver';
+import { runPublish } from '../../services/publisher';
 import { runValidation } from '../../services/validator';
 import { env } from '../../config/env';
 import { asyncHandler } from '../middleware';
@@ -21,7 +28,15 @@ import { asyncHandler } from '../middleware';
 
 export const internalRouter = Router();
 
-const stepSchema = z.enum(['documents', 'movements', 'catalogs', 'validate']);
+const stepSchema = z.enum([
+  'ingest',
+  'documents',
+  'movements',
+  'catalogs',
+  'validate',
+  'publish',
+]);
+type Step = z.infer<typeof stepSchema>;
 
 /** Minutos tras los cuales una corrida 'running' se considera abandonada. */
 const STALE_RUN_MINUTES = 30;
@@ -77,41 +92,57 @@ function keepAlive(promise: Promise<unknown>): void {
   }
 }
 
+interface RunRequest {
+  full: boolean;
+  tables?: string[];
+}
+
 /** Ejecuta el paso en segundo plano y deja el resultado en sync_runs. */
-function executeInBackground(step: string, runId: number, full: boolean): void {
+function executeInBackground(
+  step: Step,
+  runId: number,
+  request: RunRequest,
+): void {
   const work = (async () => {
     try {
-      if (step === 'documents') {
-        const r = await syncDocuments({ full });
+      if (step === 'publish') {
+        const summary = await runPublish({ runId, tables: request.tables });
         await finishRun(runId, {
-          status: 'success',
-          rowsRead: r.rowsRead,
-          rowsWritten: r.rowsWritten,
-          summary: r.details,
+          status: summary.errors > 0 ? 'failed' : 'success',
+          rowsWritten: summary.tables.reduce(
+            (n, t) => n + t.inserted + t.updated + t.deactivated,
+            0,
+          ),
+          errorMessage:
+            summary.errors > 0
+              ? `${summary.errors} fila(s) con error`
+              : undefined,
+          summary: summary as unknown as Record<string, unknown>,
         });
-      } else if (step === 'movements') {
-        const r = await syncMovements();
-        await finishRun(runId, {
-          status: 'success',
-          rowsRead: r.rowsRead,
-          rowsWritten: r.rowsWritten,
-          summary: r.details,
-        });
-      } else if (step === 'catalogs') {
-        const r = await syncCatalogs();
-        await finishRun(runId, {
-          status: 'success',
-          rowsRead: r.rowsRead,
-          rowsWritten: r.rowsWritten,
-          summary: r.details,
-        });
-      } else {
+      } else if (step === 'validate') {
         const summary = await runValidation({ runId });
         await finishRun(runId, {
           status: 'success',
           rowsRead: summary.documentsEvaluated,
           anomaliesFound: summary.anomaliesDetected,
           summary: summary as unknown as Record<string, unknown>,
+        });
+      } else {
+        const result = await runSyncStep(step as SyncStep, {
+          full: request.full,
+          tables: request.tables,
+        });
+        await finishRun(runId, {
+          // Un paso con filas en error no cuenta como éxito: la alerta de las
+          // 06:00 se apoya en este estado.
+          status: result.errors > 0 ? 'failed' : 'success',
+          rowsRead: result.rowsRead,
+          rowsWritten: result.rowsWritten,
+          errorMessage:
+            result.errors > 0
+              ? `${result.errors} fila(s) con error`
+              : undefined,
+          summary: stepSummary(result),
         });
       }
     } catch (err) {
@@ -123,7 +154,7 @@ function executeInBackground(step: string, runId: number, full: boolean): void {
     } finally {
       // El pool de SQL Server no debe quedar abierto entre invocaciones
       // serverless; los de Postgres sí se reutilizan.
-      if (step !== 'validate') {
+      if (step !== 'validate' && step !== 'publish') {
         await closeSqlServerPool().catch(() => undefined);
       }
     }
@@ -133,24 +164,54 @@ function executeInBackground(step: string, runId: number, full: boolean): void {
 }
 
 // ---------------------------------------------------------------------------
-// POST /internal/run?step=...
+// POST /internal/run?step=...&full=true&tables=admConceptos,admAlmacenes
 // ---------------------------------------------------------------------------
+
+const tablesSchema = z
+  .string()
+  .transform((raw) =>
+    raw
+      .split(',')
+      .map((t) => t.trim())
+      .filter(Boolean),
+  )
+  .optional();
 
 internalRouter.post(
   '/run',
   asyncHandler(async (req, res) => {
-    const parsed = stepSchema.safeParse(req.query.step ?? req.body?.step);
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const parsed = stepSchema.safeParse(req.query.step ?? body.step);
 
     if (!parsed.success) {
       res.status(400).json({
         error: 'step inválido',
-        valid: ['documents', 'movements', 'catalogs', 'validate'],
+        valid: stepSchema.options,
       });
       return;
     }
 
     const step = parsed.data;
-    const full = req.query.full === 'true' || req.body?.full === true;
+    const full = req.query.full === 'true' || body.full === true;
+
+    const tablesRaw = req.query.tables ?? body.tables;
+    const tablesParsed = tablesSchema.safeParse(
+      typeof tablesRaw === 'string'
+        ? tablesRaw
+        : Array.isArray(tablesRaw)
+          ? tablesRaw.join(',')
+          : undefined,
+    );
+    if (
+      !tablesParsed.success ||
+      (tablesParsed.data && step !== 'ingest' && step !== 'publish')
+    ) {
+      res.status(400).json({
+        error:
+          'tables solo aplica a step=ingest o step=publish, separadas por coma',
+      });
+      return;
+    }
 
     if (await hasRunningStep(step)) {
       res.status(409).json({
@@ -160,15 +221,20 @@ internalRouter.post(
       return;
     }
 
-    const runId = await startRun(step, step === 'validate' ? env.VALIDATOR_MODE : undefined);
+    const runId = await startRun(
+      step,
+      step === 'validate' ? env.VALIDATOR_MODE : undefined,
+    );
 
-    executeInBackground(step, runId, full);
+    executeInBackground(step, runId, { full, tables: tablesParsed.data });
 
     // 202: aceptado y en proceso. El cron no espera el resultado.
     res.status(202).json({
       accepted: true,
       step,
       runId,
+      full: step === 'validate' ? undefined : full,
+      tables: tablesParsed.data,
       mode: step === 'validate' ? env.VALIDATOR_MODE : undefined,
       track: `/anomalies/runs`,
     });
